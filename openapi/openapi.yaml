@@ -1,0 +1,30 @@
+openapi: 3.0.3
+info:
+  title: Smart Household Food Management API
+  version: 1.0.0
+servers:
+  - url: http://localhost:4000
+paths:
+  /api/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  service:
+                    type: string
+                  version:
+                    type: string
+  /api/inventory-items:
+    get:
+      summary: List inventory items
+      responses:
+        '200':
+          description: Inventory list
