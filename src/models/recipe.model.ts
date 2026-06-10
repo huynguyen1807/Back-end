@@ -1,0 +1,39 @@
+import { Schema } from 'mongoose';
+
+import { existingModel, objectId, timestamps } from './modelHelpers';
+
+const recipeIngredientSchema = new Schema(
+  {
+    ingredientName: { type: String, required: true },
+    categoryId: { type: objectId, ref: 'FoodCategory' },
+    quantity: { type: Number, required: true, min: 0 },
+    unit: { type: String, required: true },
+    isRequired: { type: Boolean, default: true }
+  },
+  { _id: false }
+);
+
+const recipeSchema = new Schema(
+  {
+    recipeName: { type: String, required: true, trim: true },
+    description: String,
+    imageUrl: String,
+    cookingSteps: [{ type: String }],
+    cookingTime: { type: Number, min: 0 },
+    difficulty: { type: String, enum: ['EASY', 'MEDIUM', 'HARD'], default: 'EASY' },
+    calories: { type: Number, min: 0 },
+    tags: [{ type: String, index: true }],
+    ingredients: [recipeIngredientSchema],
+    sourceType: {
+      type: String,
+      enum: ['SYSTEM', 'AI_GENERATED', 'VIDEO_EXTRACTED'],
+      default: 'SYSTEM'
+    },
+    createdBy: { type: objectId, ref: 'User' }
+  },
+  timestamps
+);
+
+recipeSchema.index({ recipeName: 'text', tags: 1 });
+
+export const Recipe = existingModel('Recipe', recipeSchema, 'recipes');
