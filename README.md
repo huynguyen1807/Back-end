@@ -16,11 +16,11 @@ Create `backend/.env`:
 ```bash
 PORT=4000
 NODE_ENV=development
-MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-url>/freshfriends?retryWrites=true&w=majority&appName=FreshFriends
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-url>/?retryWrites=true&w=majority&appName=SHFMS
 MONGODB_DB_NAME=freshfriends
 ```
 
-The server connects through Mongoose on startup and creates the core indexes for the FreshFriends collections.
+The server connects through Mongoose on startup and creates the indexes defined by the SHFMS database design.
 
 ## Owns
 

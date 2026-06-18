@@ -4,9 +4,11 @@ import { existingModel, objectId, timestamps } from './modelHelpers';
 
 const foodItemSchema = new Schema(
   {
-    userId: { type: objectId, ref: 'User', required: true, index: true },
-    categoryId: { type: objectId, ref: 'FoodCategory', required: true, index: true },
-    storageLocationId: { type: objectId, ref: 'StorageLocation', required: true, index: true },
+    ownerType: { type: String, enum: ['USER', 'HOUSEHOLD'], required: true },
+    userId: { type: objectId, ref: 'User' },
+    householdId: { type: objectId, ref: 'Household' },
+    categoryId: { type: objectId, ref: 'FoodCategory', required: true },
+    storageLocationId: { type: objectId, ref: 'StorageLocation', required: true },
     foodName: { type: String, required: true, trim: true },
     imageUrl: String,
     sourceType: { type: String, enum: ['SUPERMARKET', 'MARKET'], required: true },
@@ -24,14 +26,20 @@ const foodItemSchema = new Schema(
     scanResultId: { type: objectId, ref: 'ScanResult' },
     aiPredictionId: { type: objectId, ref: 'AIPrediction' },
     isConsumed: { type: Boolean, default: false },
-    consumedAt: Date
+    consumedAt: Date,
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: Date,
+    createdBy: { type: objectId, ref: 'User', required: true },
+    updatedBy: { type: objectId, ref: 'User' }
   },
   timestamps
 );
 
 foodItemSchema.index({ userId: 1, expiryDate: 1 });
+foodItemSchema.index({ householdId: 1, expiryDate: 1 });
 foodItemSchema.index({ userId: 1, status: 1 });
-foodItemSchema.index({ userId: 1, storageLocationId: 1 });
-foodItemSchema.index({ userId: 1, categoryId: 1 });
+foodItemSchema.index({ householdId: 1, status: 1 });
+foodItemSchema.index({ storageLocationId: 1 });
+foodItemSchema.index({ categoryId: 1 });
 
 export const FoodItem = existingModel('FoodItem', foodItemSchema, 'food_items');

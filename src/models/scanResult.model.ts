@@ -4,7 +4,8 @@ import { existingModel, objectId } from './modelHelpers';
 
 const scanResultSchema = new Schema(
   {
-    userId: { type: objectId, ref: 'User', required: true, index: true },
+    userId: { type: objectId, ref: 'User', required: true },
+    householdId: { type: objectId, ref: 'Household' },
     scanType: { type: String, enum: ['BARCODE', 'EXPIRY_DATE', 'FOOD_IMAGE'], required: true },
     imageUrl: String,
     barcode: String,
@@ -21,5 +22,7 @@ const scanResultSchema = new Schema(
   },
   { timestamps: { createdAt: true, updatedAt: false }, versionKey: false }
 );
+
+scanResultSchema.index({ userId: 1, createdAt: -1 });
 
 export const ScanResult = existingModel('ScanResult', scanResultSchema, 'scan_results');

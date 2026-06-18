@@ -4,17 +4,26 @@ import { existingModel, objectId, timestamps } from './modelHelpers';
 
 const nutritionFactSchema = new Schema(
   {
-    foodName: { type: String, required: true, trim: true, index: true },
-    categoryId: { type: objectId, ref: 'FoodCategory', required: true, index: true },
+    foodName: { type: String, required: true, trim: true },
+    categoryId: { type: objectId, ref: 'FoodCategory', required: true },
     caloriesPerUnit: { type: Number, required: true, min: 0 },
-    unit: { type: String, enum: ['g', 'ml', 'item'], required: true },
+    unit: { type: String, enum: ['g', 'ml', 'item', 'serving'], required: true },
     protein: { type: Number, default: 0, min: 0 },
     carbs: { type: Number, default: 0, min: 0 },
     fat: { type: Number, default: 0, min: 0 },
     source: { type: String, enum: ['ADMIN', 'AI_SUGGESTED'], default: 'ADMIN' },
-    status: { type: String, enum: ['OFFICIAL', 'PENDING_REVIEW'], default: 'OFFICIAL' }
+    status: {
+      type: String,
+      enum: ['OFFICIAL', 'PENDING_REVIEW', 'REJECTED'],
+      default: 'OFFICIAL'
+    },
+    createdBy: { type: objectId, ref: 'User' },
+    reviewedBy: { type: objectId, ref: 'User' }
   },
   timestamps
 );
+
+nutritionFactSchema.index({ foodName: 'text' });
+nutritionFactSchema.index({ categoryId: 1 });
 
 export const NutritionFact = existingModel('NutritionFact', nutritionFactSchema, 'nutrition_facts');
