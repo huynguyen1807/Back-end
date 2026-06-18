@@ -4,7 +4,7 @@ import { existingModel, objectId, timestamps } from './modelHelpers';
 
 const userPreferenceSchema = new Schema(
   {
-    userId: { type: objectId, ref: 'User', required: true, unique: true, index: true },
+    userId: { type: objectId, ref: 'User', required: true, unique: true },
     dietaryGoal: {
       type: String,
       enum: ['WEIGHT_LOSS', 'MAINTAIN', 'MUSCLE_GAIN', 'HEALTHY_EATING'],
@@ -14,7 +14,13 @@ const userPreferenceSchema = new Schema(
     dislikedFoods: [{ type: String }],
     allergies: [{ type: String }],
     preferredCuisines: [{ type: String }],
-    numberOfPeople: { type: Number, default: 1, min: 1 }
+    numberOfPeople: { type: Number, default: 1, min: 1 },
+    defaultMealTypes: [
+      {
+        type: String,
+        enum: ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']
+      }
+    ]
   },
   timestamps
 );

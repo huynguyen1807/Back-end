@@ -9,7 +9,8 @@ const userSchema = new Schema(
     passwordHash: { type: String, required: true },
     avatarUrl: String,
     role: { type: String, enum: ['USER', 'ADMIN'], default: 'USER' },
-    status: { type: String, enum: ['ACTIVE', 'INACTIVE'], default: 'ACTIVE' }
+    status: { type: String, enum: ['ACTIVE', 'INACTIVE', 'BANNED'], default: 'ACTIVE' },
+    phoneNumber: String
   },
   timestamps
 );

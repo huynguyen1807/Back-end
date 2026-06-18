@@ -4,7 +4,8 @@ import { existingModel, objectId } from './modelHelpers';
 
 const aiPredictionSchema = new Schema(
   {
-    userId: { type: objectId, ref: 'User', required: true, index: true },
+    userId: { type: objectId, ref: 'User', required: true },
+    householdId: { type: objectId, ref: 'Household' },
     foodName: { type: String, required: true, trim: true },
     categoryId: { type: objectId, ref: 'FoodCategory', required: true },
     storageLocationId: { type: objectId, ref: 'StorageLocation', required: true },
@@ -22,5 +23,8 @@ const aiPredictionSchema = new Schema(
   },
   { timestamps: { createdAt: true, updatedAt: false }, versionKey: false }
 );
+
+aiPredictionSchema.index({ userId: 1, createdAt: -1 });
+aiPredictionSchema.index({ status: 1 });
 
 export const AIPrediction = existingModel('AIPrediction', aiPredictionSchema, 'ai_predictions');

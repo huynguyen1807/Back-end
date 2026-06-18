@@ -1,19 +1,23 @@
 import { Schema } from 'mongoose';
 
-import { existingModel } from './modelHelpers';
+import { existingModel, objectId, timestamps } from './modelHelpers';
 
 const storageLocationSchema = new Schema(
   {
-    locationName: {
+    ownerType: { type: String, enum: ['USER', 'HOUSEHOLD'], required: true },
+    userId: { type: objectId, ref: 'User', index: true },
+    householdId: { type: objectId, ref: 'Household', index: true },
+    storageName: { type: String, required: true, trim: true },
+    storageType: {
       type: String,
-      enum: ['REFRIGERATOR', 'OUTSIDE', 'FREEZER'],
-      required: true,
-      unique: true
+      enum: ['REFRIGERATOR', 'OUTSIDE', 'FREEZER', 'PANTRY', 'KITCHEN_CABINET', 'CUSTOM'],
+      required: true
     },
-    displayName: { type: String, required: true },
-    description: String
+    description: String,
+    isDefault: { type: Boolean, default: false },
+    isActive: { type: Boolean, default: true }
   },
-  { versionKey: false }
+  timestamps
 );
 
 export const StorageLocation = existingModel(

@@ -22,18 +22,27 @@ const recipeSchema = new Schema(
     cookingTime: { type: Number, min: 0 },
     difficulty: { type: String, enum: ['EASY', 'MEDIUM', 'HARD'], default: 'EASY' },
     calories: { type: Number, min: 0 },
-    tags: [{ type: String, index: true }],
+    macroSummary: {
+      protein: { type: Number, default: 0, min: 0 },
+      carbs: { type: Number, default: 0, min: 0 },
+      fat: { type: Number, default: 0, min: 0 }
+    },
+    tags: [{ type: String }],
     ingredients: [recipeIngredientSchema],
     sourceType: {
       type: String,
       enum: ['SYSTEM', 'AI_GENERATED', 'VIDEO_EXTRACTED'],
       default: 'SYSTEM'
     },
-    createdBy: { type: objectId, ref: 'User' }
+    videoSourceId: { type: objectId, ref: 'VideoRecipeSource' },
+    createdBy: { type: objectId, ref: 'User' },
+    isActive: { type: Boolean, default: true }
   },
   timestamps
 );
 
-recipeSchema.index({ recipeName: 'text', tags: 1 });
+recipeSchema.index({ recipeName: 'text' });
+recipeSchema.index({ tags: 1 });
+recipeSchema.index({ sourceType: 1 });
 
 export const Recipe = existingModel('Recipe', recipeSchema, 'recipes');
