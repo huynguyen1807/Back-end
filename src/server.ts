@@ -11,8 +11,8 @@ async function bootstrap() {
   try {
     await connectDatabase();
 
-    app.listen(port, () => {
-      console.log(`Backend server running on port ${port}`);
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`Backend server running on port ${port} (0.0.0.0)`);
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
