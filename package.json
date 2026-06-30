@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
@@ -19,6 +20,7 @@
     "mongodb": "^7.2.0",
     "mongoose": "^9.6.3",
     "morgan": "^1.10.0",
+    "multer": "^2.2.0",
     "nodemailer": "^9.0.1"
   },
   "devDependencies": {
@@ -28,6 +30,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/localtunnel": "^2.0.4",
     "@types/morgan": "^1.9.9",
+    "@types/multer": "^2.1.0",
     "@types/node": "^22.10.0",
     "@types/nodemailer": "^8.0.1",
     "nodemon": "^3.1.4",
