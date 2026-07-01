@@ -8,6 +8,7 @@ import foodRouter from './foodRoutes';
 import storageRouter from './storageRoutes';
 import aiRouter from './aiRoutes';
 import notificationRouter from './notificationRoutes';
+import householdRouter from './householdRoutes';
 
 const apiRouter = Router();
 
@@ -20,5 +21,6 @@ apiRouter.use('/storage-locations', storageRouter);
 apiRouter.use('/storage', storageRouter);
 apiRouter.use('/ai', aiRouter);
 apiRouter.use('/notifications', notificationRouter);
+apiRouter.use('/households', householdRouter);
 
 export default apiRouter;

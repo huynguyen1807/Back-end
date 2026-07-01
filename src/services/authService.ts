@@ -6,8 +6,11 @@ import { UserPreference } from '../models/userPreference.model';
 import { OTP } from '../models/otp.model';
 import { sendOTP } from '../utils/mailer';
 
+const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
 export const registerUser = async (userData: any) => {
-  const { fullName, email, password, phoneNumber } = userData;
+  const { fullName, password, phoneNumber } = userData;
+  const email = normalizeEmail(userData.email);
 
   const existingUser = await User.findOne({ email });
   if (existingUser) {
@@ -48,33 +51,35 @@ export const registerUser = async (userData: any) => {
 };
 
 export const verifyEmailOTP = async (email: string, otpCode: string) => {
-  const otpRecord = await OTP.findOne({ email, otp: otpCode });
+  const normalizedEmail = normalizeEmail(email);
+  const otpRecord = await OTP.findOne({ email: normalizedEmail, otp: otpCode });
   if (!otpRecord) {
     throw new Error('Mã OTP không hợp lệ hoặc đã hết hạn');
   }
 
-  const user = await User.findOne({ email });
+  const user = await User.findOne({ email: normalizedEmail });
   if (!user) throw new Error('User not found');
 
   user.status = 'ACTIVE';
   await user.save();
 
-  await OTP.deleteMany({ email }); // Xóa hết OTP cũ
+  await OTP.deleteMany({ email: normalizedEmail }); // Xóa hết OTP cũ
   return { message: 'Xác thực thành công' };
 };
 
 export const resendEmailOTP = async (email: string) => {
-  const user = await User.findOne({ email });
+  const normalizedEmail = normalizeEmail(email);
+  const user = await User.findOne({ email: normalizedEmail });
   if (!user) throw new Error('User not found');
   if (user.status === 'ACTIVE') throw new Error('Tài khoản đã được xác thực');
 
-  await OTP.deleteMany({ email }); // Xóa OTP cũ nếu có
+  await OTP.deleteMany({ email: normalizedEmail }); // Xóa OTP cũ nếu có
 
   const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-  await OTP.create({ email, otp: otpCode });
+  await OTP.create({ email: normalizedEmail, otp: otpCode });
 
   try {
-    await sendOTP(email, otpCode);
+    await sendOTP(normalizedEmail, otpCode);
   } catch (error) {
     console.error('Lỗi gửi lại email OTP:', error);
   }
@@ -83,7 +88,8 @@ export const resendEmailOTP = async (email: string) => {
 };
 
 export const loginUser = async (credentials: any) => {
-  const { email, password } = credentials;
+  const { password } = credentials;
+  const email = normalizeEmail(credentials.email);
 
   // Check if user exists
   const user = await User.findOne({ email });
@@ -116,7 +122,8 @@ export const loginUser = async (credentials: any) => {
 };
 
 export const googleLoginService = async (googleUser: any) => {
-  const { email, name, picture } = googleUser;
+  const { name, picture } = googleUser;
+  const email = normalizeEmail(googleUser.email);
   
   let user = await User.findOne({ email });
   
