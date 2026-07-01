@@ -21,8 +21,8 @@ export const register = async (req: Request, res: Response) => {
 
     const result = await registerUser({ fullName, email, password, phoneNumber });
     res.status(201).json({
-      message: 'Vui lòng kiểm tra email để lấy mã xác nhận',
-      ...result
+      ...result,
+      message: 'Vui lòng kiểm tra email để lấy mã xác nhận'
     });
   } catch (error: any) {
     if (error.message === 'Email already in use') {
