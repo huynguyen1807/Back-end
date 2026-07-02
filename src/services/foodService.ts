@@ -1,6 +1,7 @@
 import { FoodItem } from '../models/foodItem.model';
 import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
+import { resolveNutritionForFood } from './nutritionService';
 
 // ─── Tính status dựa vào expiryDate ──────────────────────────────────────────
 export function computeFoodStatus(expiryDate: Date): string {
@@ -23,6 +24,30 @@ export function computeFreshnessScore(purchaseDate: Date, expiryDate: Date): num
   return Math.max(0, Math.min(100, score));
 }
 
+async function enrichFoodNutrition(item: any) {
+  const raw = typeof item.toObject === 'function' ? item.toObject() : item;
+  const categoryId = raw.categoryId?._id || raw.categoryId;
+  const nutrition = await resolveNutritionForFood({
+    foodName: raw.foodName,
+    categoryId,
+    quantity: raw.quantity,
+    unit: raw.unit
+  });
+
+  return {
+    ...raw,
+    calories: nutrition.calories,
+    macroSummary: nutrition.macroSummary,
+    nutrition: {
+      calories: nutrition.calories,
+      macroSummary: nutrition.macroSummary,
+      matched: nutrition.matched,
+      nutritionFactId: nutrition.nutritionFactId,
+      unit: nutrition.unit
+    }
+  };
+}
+
 // ─── GET all food items của user ─────────────────────────────────────────────
 export async function getFoodItems(userId: string, filter?: string) {
   const query: any = {
@@ -41,7 +66,7 @@ export async function getFoodItems(userId: string, filter?: string) {
     .populate('storageLocationId', 'storageName storageType')
     .sort({ expiryDate: 1 });
 
-  return items;
+  return Promise.all(items.map(enrichFoodNutrition));
 }
 
 // ─── GET single food item ─────────────────────────────────────────────────────
@@ -51,7 +76,7 @@ export async function getFoodItemById(foodId: string, userId: string) {
     .populate('storageLocationId', 'storageName storageType description');
 
   if (!item) throw new Error('Food item not found');
-  return item;
+  return enrichFoodNutrition(item);
 }
 
 // ─── CREATE food item ─────────────────────────────────────────────────────────
@@ -105,7 +130,7 @@ export async function createFoodItem(userId: string, data: any) {
     createdBy: userId,
   });
 
-  return foodItem;
+  return enrichFoodNutrition(foodItem);
 }
 
 // ─── UPDATE food item ─────────────────────────────────────────────────────────
@@ -134,7 +159,7 @@ export async function updateFoodItem(foodId: string, userId: string, data: any) 
     .populate('categoryId', 'categoryName')
     .populate('storageLocationId', 'storageName storageType');
 
-  return updated;
+  return enrichFoodNutrition(updated);
 }
 
 // ─── SOFT DELETE food item ────────────────────────────────────────────────────

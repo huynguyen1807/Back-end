@@ -1,11 +1,16 @@
 import { MealPlan } from '../models/mealPlan.model';
 import { FoodItem } from '../models/foodItem.model';
 import { AIGeneratedData } from '../models/aiGeneratedData.model';
-import { NutritionFact } from '../models/nutritionFact.model';
 import { Recipe } from '../models/recipe.model';
 import { UserPreference } from '../models/userPreference.model';
 import { VideoRecipeSource } from '../models/videoRecipeSource.model';
-import { calculateMealTotals, endOfDay, startOfDay } from './nutritionService';
+import {
+  calculateMealTotals,
+  calculateNutritionForIngredients,
+  endOfDay,
+  resolveNutritionForFood,
+  startOfDay
+} from './nutritionService';
 
 type InventoryPriorityFood = {
   _id: any;
@@ -16,6 +21,13 @@ type InventoryPriorityFood = {
   expiryDate: Date;
   daysUntilExpiry: number;
   categoryName?: string;
+  categoryId?: any;
+  calories?: number;
+  macroSummary?: {
+    protein: number;
+    carbs: number;
+    fat: number;
+  };
 };
 
 async function resolveMealPayload(meal: any) {
@@ -39,8 +51,12 @@ async function resolveMealPayload(meal: any) {
 
     payload.recipeName = payload.recipeName || recipe.recipeName;
     payload.imageUrl = payload.imageUrl || recipe.imageUrl;
-    payload.calories = meal.calories !== undefined ? Number(meal.calories) : Number(recipe.calories) || 0;
-    payload.macroSummary = meal.macroSummary || recipe.macroSummary || { protein: 0, carbs: 0, fat: 0 };
+    payload.calories = Number(meal.calories) > 0
+      ? Number(meal.calories)
+      : Number(recipe.calories) || 0;
+    payload.macroSummary = hasMacroValue(meal.macroSummary)
+      ? meal.macroSummary
+      : recipe.macroSummary || { protein: 0, carbs: 0, fat: 0 };
   }
 
   if (!payload.recipeName?.trim()) throw new Error('recipeName is required');
@@ -62,8 +78,8 @@ async function buildMealPlanPayload(userId: string, data: any) {
     householdId: data.householdId,
     planDate: startOfDay(data.planDate),
     goal: data.goal,
-    totalCalories: data.totalCalories ?? totals.totalCalories,
-    macroSummary: data.macroSummary ?? totals.macroSummary,
+    totalCalories: totals.totalCalories,
+    macroSummary: totals.macroSummary,
     meals,
     generatedBy: data.generatedBy || 'USER',
     note: data.note
@@ -146,6 +162,49 @@ function normalize(value: string) {
   return value.trim().toLowerCase();
 }
 
+function hasMacroValue(macroSummary: any) {
+  return (
+    Number(macroSummary?.protein) > 0 ||
+    Number(macroSummary?.carbs) > 0 ||
+    Number(macroSummary?.fat) > 0
+  );
+}
+
+function getCategoryId(value: any) {
+  return value?._id || value;
+}
+
+function getCategoryName(value: any) {
+  return typeof value === 'object' ? value?.categoryName : undefined;
+}
+
+function getMealLabel(mealType: string) {
+  if (mealType === 'BREAKFAST') return 'Breakfast';
+  if (mealType === 'LUNCH') return 'Lunch';
+  if (mealType === 'DINNER') return 'Dinner';
+  return 'Snack';
+}
+
+function isBlockedByPreference(foodName: string, preference: any) {
+  const normalized = normalize(foodName);
+  const disliked = preference?.dislikedFoods || [];
+  const allergies = preference?.allergies || [];
+  return [...disliked, ...allergies].some((item: string) => {
+    const preferenceText = normalize(item || '');
+    return preferenceText && (normalized.includes(preferenceText) || preferenceText.includes(normalized));
+  });
+}
+
+function buildPriorityReason(food: InventoryPriorityFood, calorieTarget: number, weather?: string) {
+  const reasons = [];
+  if (food.daysUntilExpiry <= 1) reasons.push('Use today');
+  else if (food.daysUntilExpiry <= 3) reasons.push('Near expiry');
+  if ((food.calories || 0) > 0) reasons.push(`${Math.round(food.calories || 0)} kcal`);
+  if (weather) reasons.push(`Weather: ${weather}`);
+  if (calorieTarget) reasons.push(`Target ${calorieTarget} kcal/day`);
+  return reasons;
+}
+
 function detectVideoPlatform(videoUrl: string) {
   const url = videoUrl.toLowerCase();
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'YOUTUBE';
@@ -175,28 +234,51 @@ function recipeInventoryScore(recipe: any, foods: any[]) {
   };
 }
 
-async function createFallbackMeal(food: any, mealType: string, calorieTarget: number) {
-  const fact = await NutritionFact.findOne({
-    foodName: new RegExp(`^${food.foodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-    status: 'OFFICIAL'
-  });
-
-  const quantity = Number(food.quantity) || 1;
-  const calories = fact ? Math.round(quantity * Number(fact.caloriesPerUnit || 0)) : Math.round(calorieTarget / 4);
-
-  return {
-    mealType,
-    recipeName: `Use ${food.foodName}`,
-    scheduledTime: mealType === 'BREAKFAST' ? '08:00' : mealType === 'LUNCH' ? '12:30' : mealType === 'DINNER' ? '19:00' : '15:30',
-    calories,
-    macroSummary: {
-      protein: fact ? Math.round(quantity * Number(fact.protein || 0)) : 0,
-      carbs: fact ? Math.round(quantity * Number(fact.carbs || 0)) : 0,
-      fat: fact ? Math.round(quantity * Number(fact.fat || 0)) : 0
-    },
-    status: 'PENDING',
-    usedFoodItemIds: [food._id]
+async function buildGeneratedRecipe(userId: string, food: InventoryPriorityFood, mealType: string, data: any) {
+  const ingredient = {
+    ingredientName: food.foodName,
+    categoryId: food.categoryId,
+    quantity: Number(food.quantity) || 1,
+    unit: food.unit || 'serving',
+    isRequired: true
   };
+  const nutrition = await calculateNutritionForIngredients([ingredient]);
+  const mealLabel = getMealLabel(mealType);
+  const recipeName = `${mealLabel} with ${food.foodName}`;
+  const priorityReasons = buildPriorityReason(food, Number(data.calorieTarget || 0), data.weather);
+  const tags = [
+    'AI_GENERATED',
+    mealType,
+    food.status === 'NEAR_EXPIRY' || food.daysUntilExpiry <= 3 ? 'NEAR_EXPIRY' : 'INVENTORY',
+    ...(data.weather ? [`WEATHER_${String(data.weather).toUpperCase()}`] : [])
+  ];
+
+  return Recipe.findOneAndUpdate(
+    {
+      recipeName,
+      createdBy: userId,
+      sourceType: 'AI_GENERATED'
+    },
+    {
+      recipeName,
+      description: `AI suggestion generated from inventory item "${food.foodName}". ${priorityReasons.join(' - ')}`,
+      cookingSteps: [
+        `Prepare ${food.foodName}.`,
+        'Season to taste.',
+        `Cook and serve for ${mealLabel.toLowerCase()}.`
+      ],
+      cookingTime: mealType === 'SNACK' ? 10 : 20,
+      difficulty: 'EASY',
+      calories: nutrition.calories,
+      macroSummary: nutrition.macroSummary,
+      tags,
+      ingredients: [ingredient],
+      sourceType: 'AI_GENERATED',
+      createdBy: userId,
+      isActive: true
+    },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
 }
 
 export async function generateDailyMealPlan(userId: string, data: any = {}) {
@@ -219,20 +301,71 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     .populate('categoryId', 'categoryName')
     .sort({ expiryDate: 1 });
 
-  const priorityFoods: InventoryPriorityFood[] = foods
-    .map((food) => ({
-      _id: food._id,
-      foodName: food.foodName,
-      quantity: food.quantity,
-      unit: food.unit,
-      status: food.status,
-      expiryDate: food.expiryDate,
-      daysUntilExpiry: expiryPriority(food.expiryDate),
-      categoryName: typeof food.categoryId === 'object' ? (food.categoryId as any).categoryName : undefined
-    }))
-    .sort((a, b) => a.daysUntilExpiry - b.daysUntilExpiry);
+  const priorityFoods: InventoryPriorityFood[] = (await Promise.all(
+    foods.map(async (food) => {
+      const nutrition = await resolveNutritionForFood({
+        foodName: food.foodName,
+        categoryId: getCategoryId(food.categoryId),
+        quantity: food.quantity,
+        unit: food.unit
+      });
 
-  const recipes = await Recipe.find({ isActive: true, sourceType: { $in: ['SYSTEM', 'AI_GENERATED'] } });
+      return {
+        _id: food._id,
+        foodName: food.foodName,
+        quantity: food.quantity,
+        unit: food.unit,
+        status: food.status,
+        expiryDate: food.expiryDate,
+        daysUntilExpiry: expiryPriority(food.expiryDate),
+        categoryId: getCategoryId(food.categoryId),
+        categoryName: getCategoryName(food.categoryId),
+        calories: nutrition.calories,
+        macroSummary: nutrition.macroSummary
+      };
+    })
+  ))
+    .filter((food) => !isBlockedByPreference(food.foodName, preference))
+    .sort((a, b) => {
+      const expiryScore = a.daysUntilExpiry - b.daysUntilExpiry;
+      if (expiryScore !== 0) return expiryScore;
+      return Math.abs((a.calories || 0) - calorieTarget / selectedMealTypes.length) -
+        Math.abs((b.calories || 0) - calorieTarget / selectedMealTypes.length);
+    });
+
+  const generatedRecipes = [];
+  const usedFoodIds = new Set<string>();
+
+  for (const mealType of selectedMealTypes) {
+    const food = priorityFoods.find((item) => !usedFoodIds.has(String(item._id)));
+    if (!food) break;
+    usedFoodIds.add(String(food._id));
+    const recipe = await buildGeneratedRecipe(userId, food, mealType, {
+      ...data,
+      calorieTarget
+    });
+    generatedRecipes.push({
+      recipe,
+      score: Math.max(1, 100 - Math.max(0, food.daysUntilExpiry) * 8),
+      matchedFoods: [
+        {
+          _id: food._id,
+          foodName: food.foodName,
+          status: food.status,
+          expiryDate: food.expiryDate
+        }
+      ],
+      priorityReasons: buildPriorityReason(food, calorieTarget, data.weather)
+    });
+  }
+
+  const recipes = await Recipe.find({
+    isActive: true,
+    $or: [
+      { sourceType: 'SYSTEM' },
+      { createdBy: userId }
+    ]
+  });
   const scoredRecipes = recipes
     .map((recipe) => {
       const scoring = recipeInventoryScore(recipe, foods);
@@ -241,55 +374,9 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  const meals: any[] = [];
-  const usedRecipeIds = new Set<string>();
-
-  for (const mealType of selectedMealTypes) {
-    const candidate = scoredRecipes.find((item) => !usedRecipeIds.has(item.recipe._id.toString()));
-    if (candidate) {
-      usedRecipeIds.add(candidate.recipe._id.toString());
-      meals.push({
-        mealType,
-        recipeId: candidate.recipe._id,
-        recipeName: candidate.recipe.recipeName,
-        imageUrl: candidate.recipe.imageUrl,
-        scheduledTime: mealType === 'BREAKFAST' ? '08:00' : mealType === 'LUNCH' ? '12:30' : mealType === 'DINNER' ? '19:00' : '15:30',
-        calories: Number(candidate.recipe.calories) || Math.round(calorieTarget / selectedMealTypes.length),
-        macroSummary: candidate.recipe.macroSummary || { protein: 0, carbs: 0, fat: 0 },
-        status: 'PENDING',
-        usedFoodItemIds: candidate.matchedFoods.map((food) => food._id)
-      });
-      continue;
-    }
-
-    const fallbackFood = priorityFoods[meals.length % Math.max(1, priorityFoods.length)];
-    if (fallbackFood) {
-      meals.push(await createFallbackMeal(fallbackFood, mealType, calorieTarget));
-    }
-  }
-
-  const totals = calculateMealTotals(meals);
-  const payload = {
-    userId,
-    planDate,
-    goal: data.goal || preference?.dietaryGoal || 'HEALTHY_EATING',
-    totalCalories: totals.totalCalories,
-    macroSummary: totals.macroSummary,
-    meals,
-    generatedBy: 'AI',
-    note: `Generated from ${priorityFoods.length} inventory item(s), prioritizing near-expiry food.`
-  };
-
-  const plan = await MealPlan.findOneAndUpdate(
-    { userId, planDate },
-    payload,
-    { new: true, upsert: true }
-  ).populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
-
-  return {
-    plan,
-    inventoryPriority: priorityFoods,
-    recommendations: scoredRecipes.slice(0, 8).map((item) => ({
+  const recommendations = [
+    ...generatedRecipes,
+    ...scoredRecipes.map((item) => ({
       recipe: item.recipe,
       score: item.score,
       matchedFoods: item.matchedFoods.map((food) => ({
@@ -297,8 +384,19 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
         foodName: food.foodName,
         status: food.status,
         expiryDate: food.expiryDate
-      }))
-    })),
+      })),
+      priorityReasons: item.matchedFoods.some((food) => food.status === 'NEAR_EXPIRY')
+        ? ['Near expiry match']
+        : ['Inventory match']
+    }))
+  ];
+
+  return {
+    plan: null,
+    generatedRecipes: generatedRecipes.map((item) => item.recipe),
+    inventoryPriority: priorityFoods,
+    recommendations: recommendations.slice(0, 12),
+    planDate,
     calorieTarget
   };
 }
