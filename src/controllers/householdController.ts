@@ -6,6 +6,7 @@ import {
   addHouseholdMember,
   cancelHouseholdInvitation,
   createHousehold,
+  deleteHousehold,
   getHouseholdInvitations,
   getHouseholdMembers,
   getMyHouseholds,
@@ -26,6 +27,10 @@ function getStatusCode(message: string) {
 
   if (message.includes('expired')) {
     return 410;
+  }
+
+  if (message.includes('requires') || message.includes('limit reached')) {
+    return 403;
   }
 
   if (
@@ -63,6 +68,15 @@ export const getMyHouseholdsHandler = async (req: AuthRequest, res: Response) =>
   try {
     const households = await getMyHouseholds(req.user!.userId);
     res.json({ success: true, data: households });
+  } catch (error: any) {
+    handleHouseholdError(res, error);
+  }
+};
+
+export const deleteHouseholdHandler = async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await deleteHousehold(req.params.id as string, req.user!.userId);
+    res.json({ success: true, ...result });
   } catch (error: any) {
     handleHouseholdError(res, error);
   }

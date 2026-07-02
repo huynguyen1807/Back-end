@@ -1,10 +1,13 @@
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 
+import { FoodItem } from '../models/foodItem.model';
 import { Household } from '../models/household.model';
 import { HouseholdInvitation } from '../models/householdInvitation.model';
 import { HouseholdMember } from '../models/householdMember.model';
+import { StorageLocation } from '../models/storageLocation.model';
 import { User } from '../models/user.model';
+import { userHasActivePremium } from './subscriptionService';
 
 type HouseholdRole = 'OWNER' | 'MEMBER';
 
@@ -31,6 +34,8 @@ const OWNER_PERMISSION: Required<MemberPermission> = {
   canEditShoppingList: true,
   canInviteMember: true
 };
+
+const FAMILY_MEMBER_LIMIT = 6;
 
 function assertValidObjectId(id: string, label: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -83,6 +88,45 @@ async function ensureCanManageMembers(householdId: string, userId: string) {
   return member;
 }
 
+async function ensureHouseholdOwner(householdId: string, userId: string) {
+  const member = await getActiveMember(householdId, userId);
+  if (!member || member.role !== 'OWNER') {
+    throw new Error('Only owner can delete household');
+  }
+
+  return member;
+}
+
+async function ensureFamilyCloudPremium(userId: string) {
+  const hasPremium = await userHasActivePremium(userId);
+  if (!hasPremium) {
+    throw new Error('Family Cloud requires an active Premium subscription');
+  }
+}
+
+async function ensureHouseholdOwnerHasPremium(householdId: string) {
+  const household = await ensureHouseholdExists(householdId);
+  await ensureFamilyCloudPremium(household.ownerId.toString());
+  return household;
+}
+
+async function ensureHouseholdHasAvailableSlot(householdId: string) {
+  await expirePendingInvitations();
+
+  const [activeMembers, pendingInvitations] = await Promise.all([
+    HouseholdMember.countDocuments({ householdId, status: 'ACTIVE' }),
+    HouseholdInvitation.countDocuments({
+      householdId,
+      status: 'PENDING',
+      expiresAt: { $gt: new Date() }
+    })
+  ]);
+
+  if (activeMembers + pendingInvitations >= FAMILY_MEMBER_LIMIT) {
+    throw new Error('Family Cloud member limit reached');
+  }
+}
+
 async function assertUserCanCreateOrJoinFamilyPlan(
   userId: string,
   email: string,
@@ -122,6 +166,58 @@ async function expirePendingInvitations() {
   );
 }
 
+async function mergeUserInventoryIntoHousehold(userId: string, householdId: string) {
+  await Promise.all([
+    StorageLocation.updateMany(
+      { ownerType: 'USER', userId },
+      {
+        $set: {
+          ownerType: 'HOUSEHOLD',
+          householdId
+        },
+        $unset: { userId: '' }
+      }
+    ),
+    FoodItem.updateMany(
+      { ownerType: 'USER', userId },
+      {
+        $set: {
+          ownerType: 'HOUSEHOLD',
+          householdId,
+          updatedBy: userId
+        },
+        $unset: { userId: '' }
+      }
+    )
+  ]);
+}
+
+async function transferHouseholdInventoryToOwner(householdId: string, ownerId: string) {
+  await Promise.all([
+    StorageLocation.updateMany(
+      { ownerType: 'HOUSEHOLD', householdId },
+      {
+        $set: {
+          ownerType: 'USER',
+          userId: ownerId
+        },
+        $unset: { householdId: '' }
+      }
+    ),
+    FoodItem.updateMany(
+      { ownerType: 'HOUSEHOLD', householdId },
+      {
+        $set: {
+          ownerType: 'USER',
+          userId: ownerId,
+          updatedBy: ownerId
+        },
+        $unset: { householdId: '' }
+      }
+    )
+  ]);
+}
+
 export async function createHousehold(userId: string, data: any) {
   const householdName = data.householdName?.trim();
   if (!householdName) {
@@ -133,6 +229,7 @@ export async function createHousehold(userId: string, data: any) {
     throw new Error('User not found');
   }
 
+  await ensureFamilyCloudPremium(userId);
   await assertUserCanCreateOrJoinFamilyPlan(userId, user.email);
 
   const household = await Household.create({
@@ -169,6 +266,26 @@ export async function getMyHouseholds(userId: string) {
     }));
 }
 
+export async function deleteHousehold(householdId: string, requesterId: string) {
+  const household = await ensureHouseholdExists(householdId);
+  await ensureHouseholdOwner(householdId, requesterId);
+
+  await transferHouseholdInventoryToOwner(householdId, household.ownerId.toString());
+
+  household.status = 'INACTIVE';
+  await household.save();
+
+  await Promise.all([
+    HouseholdMember.updateMany({ householdId, status: 'ACTIVE' }, { status: 'REMOVED' }),
+    HouseholdInvitation.updateMany(
+      { householdId, status: 'PENDING' },
+      { status: 'CANCELLED' }
+    )
+  ]);
+
+  return { message: 'Household deleted' };
+}
+
 export async function getHouseholdMembers(householdId: string, requesterId: string) {
   await ensureHouseholdExists(householdId);
 
@@ -183,8 +300,9 @@ export async function getHouseholdMembers(householdId: string, requesterId: stri
 }
 
 export async function addHouseholdMember(householdId: string, requesterId: string, data: any) {
-  await ensureHouseholdExists(householdId);
+  await ensureHouseholdOwnerHasPremium(householdId);
   await ensureCanManageMembers(householdId, requesterId);
+  await ensureHouseholdHasAvailableSlot(householdId);
 
   const userId = data.userId;
   const email = normalizeEmail(data.email);
@@ -292,7 +410,7 @@ export async function acceptHouseholdInvitation(userId: string, invitationId: st
     throw new Error('Household invitation expired');
   }
 
-  await ensureHouseholdExists(invitation.householdId.toString());
+  await ensureHouseholdOwnerHasPremium(invitation.householdId.toString());
   await assertUserCanCreateOrJoinFamilyPlan(userId, email, invitationId);
 
   const member = await HouseholdMember.create({
@@ -302,6 +420,8 @@ export async function acceptHouseholdInvitation(userId: string, invitationId: st
     permission: DEFAULT_MEMBER_PERMISSION,
     status: 'ACTIVE'
   });
+
+  await mergeUserInventoryIntoHousehold(userId, invitation.householdId.toString());
 
   invitation.status = 'ACCEPTED';
   await invitation.save();

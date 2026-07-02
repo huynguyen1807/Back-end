@@ -5,6 +5,7 @@ import {
   addHouseholdMemberHandler,
   cancelHouseholdInvitationHandler,
   createHouseholdHandler,
+  deleteHouseholdHandler,
   getHouseholdInvitationsHandler,
   getHouseholdMembersHandler,
   getMyHouseholdInvitationsHandler,
@@ -24,6 +25,7 @@ router.get('/me', getMyHouseholdsHandler);
 router.get('/invitations/me', getMyHouseholdInvitationsHandler);
 router.post('/invitations/:invitationId/accept', acceptHouseholdInvitationHandler);
 router.post('/invitations/:invitationId/reject', rejectHouseholdInvitationHandler);
+router.delete('/:id', deleteHouseholdHandler);
 router.post('/:id/members', addHouseholdMemberHandler);
 router.get('/:id/members', getHouseholdMembersHandler);
 router.get('/:id/invitations', getHouseholdInvitationsHandler);
