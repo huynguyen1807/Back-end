@@ -1,7 +1,31 @@
 import { FoodItem } from '../models/foodItem.model';
 import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
+import { HouseholdMember } from '../models/householdMember.model';
 import { resolveNutritionForFood } from './nutritionService';
+
+async function getInventoryOwnerContext(userId: string) {
+  const membership = await HouseholdMember.findOne({ userId, status: 'ACTIVE' }).sort({ joinedAt: 1 });
+
+  if (membership) {
+    return {
+      ownerType: 'HOUSEHOLD',
+      householdId: membership.householdId,
+      userId
+    };
+  }
+
+  return {
+    ownerType: 'USER',
+    userId
+  };
+}
+
+function buildOwnerQuery(context: any) {
+  return context.ownerType === 'HOUSEHOLD'
+    ? { ownerType: 'HOUSEHOLD', householdId: context.householdId }
+    : { ownerType: 'USER', userId: context.userId };
+}
 
 // ─── Tính status dựa vào expiryDate ──────────────────────────────────────────
 export function computeFoodStatus(expiryDate: Date): string {
@@ -50,9 +74,9 @@ async function enrichFoodNutrition(item: any) {
 
 // ─── GET all food items của user ─────────────────────────────────────────────
 export async function getFoodItems(userId: string, filter?: string) {
+  const context = await getInventoryOwnerContext(userId);
   const query: any = {
-    ownerType: 'USER',
-    userId,
+    ...buildOwnerQuery(context),
     isDeleted: false,
     isConsumed: false,
     quantity: { $gt: 0 },
@@ -72,7 +96,8 @@ export async function getFoodItems(userId: string, filter?: string) {
 
 // ─── GET single food item ─────────────────────────────────────────────────────
 export async function getFoodItemById(foodId: string, userId: string) {
-  const item = await FoodItem.findOne({ _id: foodId, userId, isDeleted: false })
+  const context = await getInventoryOwnerContext(userId);
+  const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false })
     .populate('categoryId', 'categoryName description')
     .populate('storageLocationId', 'storageName storageType description');
 
@@ -82,6 +107,7 @@ export async function getFoodItemById(foodId: string, userId: string) {
 
 // ─── CREATE food item ─────────────────────────────────────────────────────────
 export async function createFoodItem(userId: string, data: any) {
+  const context = await getInventoryOwnerContext(userId);
   const {
     categoryId,
     storageLocationId,
@@ -105,8 +131,8 @@ export async function createFoodItem(userId: string, data: any) {
   if (!category) throw new Error('Category not found');
 
   // Validate storage location belongs to user
-  const location = await StorageLocation.findOne({ _id: storageLocationId, userId, isActive: true });
-  if (!location) throw new Error('Storage location not found or not owned by user');
+  const location = await StorageLocation.findOne({ _id: storageLocationId, ...buildOwnerQuery(context), isActive: true });
+  if (!location) throw new Error('Storage location not found or not available for this inventory');
 
   const expiry = new Date(expiryDate);
   const purchase = new Date(purchaseDate);
@@ -114,8 +140,7 @@ export async function createFoodItem(userId: string, data: any) {
   const freshnessScore = computeFreshnessScore(purchase, expiry);
 
   const foodItem = await FoodItem.create({
-    ownerType: 'USER',
-    userId,
+    ...buildOwnerQuery(context),
     categoryId,
     storageLocationId,
     foodName: foodName.trim(),
@@ -136,7 +161,8 @@ export async function createFoodItem(userId: string, data: any) {
 
 // ─── UPDATE food item ─────────────────────────────────────────────────────────
 export async function updateFoodItem(foodId: string, userId: string, data: any) {
-  const item = await FoodItem.findOne({ _id: foodId, userId, isDeleted: false });
+  const context = await getInventoryOwnerContext(userId);
+  const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false });
   if (!item) throw new Error('Food item not found');
 
   const allowedFields = [
@@ -147,6 +173,15 @@ export async function updateFoodItem(foodId: string, userId: string, data: any) 
   const updateData: any = {};
   for (const field of allowedFields) {
     if (data[field] !== undefined) updateData[field] = data[field];
+  }
+
+  if (updateData.storageLocationId) {
+    const location = await StorageLocation.findOne({
+      _id: updateData.storageLocationId,
+      ...buildOwnerQuery(context),
+      isActive: true
+    });
+    if (!location) throw new Error('Storage location not found or not available for this inventory');
   }
 
   // Recalculate status & freshness if expiry changed
@@ -165,7 +200,8 @@ export async function updateFoodItem(foodId: string, userId: string, data: any) 
 
 // ─── SOFT DELETE food item ────────────────────────────────────────────────────
 export async function deleteFoodItem(foodId: string, userId: string) {
-  const item = await FoodItem.findOne({ _id: foodId, userId, isDeleted: false });
+  const context = await getInventoryOwnerContext(userId);
+  const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false });
   if (!item) throw new Error('Food item not found');
 
   await FoodItem.findByIdAndUpdate(foodId, {
@@ -179,7 +215,8 @@ export async function deleteFoodItem(foodId: string, userId: string) {
 
 // ─── MARK as consumed ─────────────────────────────────────────────────────────
 export async function markFoodConsumed(foodId: string, userId: string) {
-  const item = await FoodItem.findOne({ _id: foodId, userId, isDeleted: false, isConsumed: false });
+  const context = await getInventoryOwnerContext(userId);
+  const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false, isConsumed: false });
   if (!item) throw new Error('Food item not found or already consumed');
 
   await FoodItem.findByIdAndUpdate(foodId, {
@@ -198,7 +235,8 @@ export async function getFoodCategories() {
 
 // ─── Summary stats ────────────────────────────────────────────────────────────
 export async function getFoodSummary(userId: string) {
-  const base = { ownerType: 'USER', userId, isDeleted: false, isConsumed: false };
+  const context = await getInventoryOwnerContext(userId);
+  const base = { ...buildOwnerQuery(context), isDeleted: false, isConsumed: false };
 
   const [total, safe, nearExpiry, expired] = await Promise.all([
     FoodItem.countDocuments(base),

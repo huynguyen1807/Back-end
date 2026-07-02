@@ -6,7 +6,7 @@ const householdMemberSchema = new Schema(
   {
     householdId: { type: objectId, ref: 'Household', required: true },
     userId: { type: objectId, ref: 'User', required: true },
-    role: { type: String, enum: ['OWNER', 'ADMIN', 'MEMBER'], required: true },
+    role: { type: String, enum: ['OWNER', 'MEMBER'], required: true },
     permission: {
       canViewInventory: { type: Boolean, default: true },
       canEditInventory: { type: Boolean, default: false },

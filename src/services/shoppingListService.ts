@@ -109,9 +109,7 @@ async function ensureCanEditList(list: any, userId: string) {
 
   const member = await getActiveHouseholdMember(list.householdId?.toString(), userId);
   const canEdit =
-    member?.role === 'OWNER' ||
-    member?.role === 'ADMIN' ||
-    member?.permission?.canEditShoppingList;
+    member?.role === 'OWNER' || member?.permission?.canEditShoppingList;
 
   if (!canEdit) {
     throw new Error('You do not have permission to edit this shopping list');
@@ -176,10 +174,7 @@ export async function createShoppingList(userId: string, data: any) {
     assertValidObjectId(householdId, 'householdId');
 
     const member = await getActiveHouseholdMember(householdId, userId);
-    const canCreate =
-      member?.role === 'OWNER' ||
-      member?.role === 'ADMIN' ||
-      member?.permission?.canEditShoppingList;
+    const canCreate = member?.role === 'OWNER' || member?.permission?.canEditShoppingList;
 
     if (!canCreate) {
       throw new Error('You do not have permission to create a shared shopping list');
