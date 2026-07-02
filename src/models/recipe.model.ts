@@ -31,7 +31,7 @@ const recipeSchema = new Schema(
     ingredients: [recipeIngredientSchema],
     sourceType: {
       type: String,
-      enum: ['SYSTEM', 'AI_GENERATED', 'VIDEO_EXTRACTED'],
+      enum: ['SYSTEM', 'USER_CREATED', 'AI_GENERATED', 'VIDEO_EXTRACTED'],
       default: 'SYSTEM'
     },
     videoSourceId: { type: objectId, ref: 'VideoRecipeSource' },
