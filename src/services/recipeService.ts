@@ -35,7 +35,7 @@ async function buildRecipePayload(data: any, userId: string, isAdmin = false) {
     ? data.cookingSteps.map((step: string) => String(step).trim()).filter(Boolean)
     : [];
   payload.ingredients = Array.isArray(data.ingredients) ? data.ingredients : [];
-  payload.sourceType = data.sourceType || (isAdmin ? 'SYSTEM' : 'USER_CREATED');
+  payload.sourceType = isAdmin ? (data.sourceType || 'SYSTEM') : 'USER_CREATED';
 
   const shouldCalculate =
     payload.ingredients.length > 0 &&

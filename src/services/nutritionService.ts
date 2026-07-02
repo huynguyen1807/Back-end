@@ -50,6 +50,100 @@ function resolveFactor(quantity: number, ingredientUnit?: string, factUnit?: str
   return qty;
 }
 
+function normalizeName(value?: string) {
+  return String(value || '').trim().toLowerCase();
+}
+
+export async function findNutritionFactForFood(foodName: string, categoryId?: any) {
+  const name = foodName.trim();
+  if (!name) return null;
+
+  const baseQuery: any = { status: 'OFFICIAL' };
+  if (categoryId) baseQuery.categoryId = categoryId;
+
+  let fact = await NutritionFact.findOne({
+    ...baseQuery,
+    foodName: new RegExp(`^${escapeRegex(name)}$`, 'i')
+  }).sort({ source: 1 });
+
+  if (!fact) {
+    fact = await NutritionFact.findOne({
+      ...baseQuery,
+      foodName: new RegExp(escapeRegex(name), 'i')
+    }).sort({ source: 1 });
+  }
+
+  if (!fact) {
+    const candidates = await NutritionFact.find(baseQuery).sort({ source: 1, foodName: 1 }).limit(80);
+    const normalizedFoodName = normalizeName(name);
+    fact = candidates.find((candidate) => {
+      const normalizedFactName = normalizeName(candidate.foodName);
+      return (
+        normalizedFoodName.includes(normalizedFactName) ||
+        normalizedFactName.includes(normalizedFoodName)
+      );
+    }) || null;
+  }
+
+  if (!fact && categoryId) {
+    fact = await NutritionFact.findOne({ categoryId, status: 'OFFICIAL' }).sort({
+      source: 1,
+      foodName: 1
+    });
+  }
+
+  if (!fact) {
+    fact = await NutritionFact.findOne({
+      foodName: new RegExp(`^${escapeRegex(name)}$`, 'i'),
+      status: 'OFFICIAL'
+    }).sort({ source: 1 });
+  }
+
+  return fact;
+}
+
+export async function resolveNutritionForFood(input: IngredientInput) {
+  const foodName = (input.ingredientName || input.foodName || '').trim();
+  const quantity = Number(input.quantity) || 0;
+
+  if (!foodName || quantity <= 0) {
+    return {
+      calories: 0,
+      macroSummary: emptyMacro(),
+      nutritionFactId: undefined,
+      matched: false
+    };
+  }
+
+  const fact = await findNutritionFactForFood(foodName, input.categoryId);
+  if (!fact) {
+    return {
+      calories: 0,
+      macroSummary: emptyMacro(),
+      nutritionFactId: undefined,
+      matched: false
+    };
+  }
+
+  const factor = resolveFactor(quantity, input.unit, fact.unit);
+  const calories = factor * (Number(fact.caloriesPerUnit) || 0);
+  const protein = factor * (Number(fact.protein) || 0);
+  const carbs = factor * (Number(fact.carbs) || 0);
+  const fat = factor * (Number(fact.fat) || 0);
+
+  return {
+    calories: round(calories),
+    macroSummary: {
+      protein: round(protein),
+      carbs: round(carbs),
+      fat: round(fat)
+    },
+    nutritionFactId: fact._id,
+    matched: true,
+    unit: fact.unit
+  };
+}
+
 export function calculateMealTotals(meals: any[] = []) {
   const total = meals.reduce(
     (acc, meal) => {
@@ -86,22 +180,9 @@ export async function calculateNutritionForIngredients(ingredients: IngredientIn
 
     if (!foodName || quantity <= 0) continue;
 
-    const query: any = {
-      foodName: new RegExp(`^${escapeRegex(foodName)}$`, 'i'),
-      status: 'OFFICIAL'
-    };
-    if (ingredient.categoryId) query.categoryId = ingredient.categoryId;
+    const nutrition = await resolveNutritionForFood(ingredient);
 
-    let fact = await NutritionFact.findOne(query).sort({ source: 1 });
-
-    if (!fact && ingredient.categoryId) {
-      fact = await NutritionFact.findOne({
-        foodName: new RegExp(`^${escapeRegex(foodName)}$`, 'i'),
-        status: 'OFFICIAL'
-      }).sort({ source: 1 });
-    }
-
-    if (!fact) {
+    if (!nutrition.matched) {
       unmatched.push({
         ingredientName: foodName,
         quantity,
@@ -110,28 +191,18 @@ export async function calculateNutritionForIngredients(ingredients: IngredientIn
       continue;
     }
 
-    const factor = resolveFactor(quantity, ingredient.unit, fact.unit);
-    const calories = factor * (Number(fact.caloriesPerUnit) || 0);
-    const protein = factor * (Number(fact.protein) || 0);
-    const carbs = factor * (Number(fact.carbs) || 0);
-    const fat = factor * (Number(fact.fat) || 0);
-
-    totals.calories += calories;
-    totals.macroSummary.protein += protein;
-    totals.macroSummary.carbs += carbs;
-    totals.macroSummary.fat += fat;
+    totals.calories += nutrition.calories;
+    totals.macroSummary.protein += nutrition.macroSummary.protein;
+    totals.macroSummary.carbs += nutrition.macroSummary.carbs;
+    totals.macroSummary.fat += nutrition.macroSummary.fat;
 
     details.push({
       ingredientName: foodName,
       quantity,
       unit: ingredient.unit,
-      nutritionFactId: fact._id,
-      calories: round(calories),
-      macroSummary: {
-        protein: round(protein),
-        carbs: round(carbs),
-        fat: round(fat)
-      }
+      nutritionFactId: nutrition.nutritionFactId,
+      calories: nutrition.calories,
+      macroSummary: nutrition.macroSummary
     });
   }
 
