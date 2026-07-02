@@ -7,6 +7,7 @@ import subscriptionRouter from './subscriptionRoutes';
 import foodRouter from './foodRoutes';
 import storageRouter from './storageRoutes';
 import householdRouter from './householdRoutes';
+import shoppingListRouter from './shoppingListRoutes';
 
 const apiRouter = Router();
 
@@ -18,5 +19,6 @@ apiRouter.use('/foods', foodRouter);
 apiRouter.use('/storage-locations', storageRouter);
 apiRouter.use('/storage', storageRouter);
 apiRouter.use('/households', householdRouter);
+apiRouter.use('/shopping-lists', shoppingListRouter);
 
 export default apiRouter;
