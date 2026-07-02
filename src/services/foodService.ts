@@ -55,6 +55,7 @@ export async function getFoodItems(userId: string, filter?: string) {
     userId,
     isDeleted: false,
     isConsumed: false,
+    quantity: { $gt: 0 },
   };
 
   if (filter === 'SAFE' || filter === 'NEAR_EXPIRY' || filter === 'EXPIRED') {
