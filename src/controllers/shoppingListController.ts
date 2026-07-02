@@ -2,6 +2,7 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/authMiddleware';
 import {
+  addMissingIngredientsToShoppingList,
   addShoppingListItem,
   completeShoppingList,
   createShoppingList,
@@ -106,6 +107,15 @@ export const completeShoppingListHandler = async (req: AuthRequest, res: Respons
   try {
     const list = await completeShoppingList(req.params.id as string, req.user!.userId);
     res.json({ success: true, data: list });
+  } catch (error: any) {
+    handleShoppingListError(res, error);
+  }
+};
+
+export const addMissingIngredientsHandler = async (req: AuthRequest, res: Response) => {
+  try {
+    const list = await addMissingIngredientsToShoppingList(req.user!.userId, req.body.items);
+    res.status(201).json({ success: true, data: list });
   } catch (error: any) {
     handleShoppingListError(res, error);
   }

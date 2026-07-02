@@ -4,7 +4,11 @@ import { existingModel, objectId, timestamps } from './modelHelpers';
 
 const mealSchema = new Schema(
   {
-    mealType: { type: String, enum: ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK'], required: true },
+    mealType: {
+      type: String,
+      enum: ['BREAKFAST', 'LUNCH', 'AFTERNOON', 'DINNER', 'LATE_NIGHT', 'SNACK'],
+      required: true
+    },
     recipeId: { type: objectId, ref: 'Recipe' },
     recipeName: { type: String, required: true },
     imageUrl: String,

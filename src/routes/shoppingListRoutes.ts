@@ -1,6 +1,7 @@
 import { Router } from 'express';
 
 import {
+  addMissingIngredientsHandler,
   addShoppingListItemHandler,
   completeShoppingListHandler,
   createShoppingListHandler,
@@ -17,6 +18,7 @@ router.use(protect);
 
 router.get('/', listShoppingListsHandler);
 router.post('/', createShoppingListHandler);
+router.post('/missing-ingredients', addMissingIngredientsHandler);
 router.get('/:id', getShoppingListHandler);
 router.post('/:id/items', addShoppingListItemHandler);
 router.patch('/:id/items/:itemId', updateShoppingListItemHandler);
