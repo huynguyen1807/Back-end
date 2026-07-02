@@ -10,7 +10,8 @@ const userSchema = new Schema(
     avatarUrl: String,
     role: { type: String, enum: ['USER', 'ADMIN'], default: 'USER' },
     status: { type: String, enum: ['ACTIVE', 'INACTIVE', 'BANNED'], default: 'ACTIVE' },
-    phoneNumber: String
+    phoneNumber: String,
+    expoPushToken: { type: String, default: null }  // Token thiết bị để gửi push notification
   },
   timestamps
 );
