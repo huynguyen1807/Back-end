@@ -13,6 +13,7 @@ import recipeRouter from './recipeRoutes';
 import mealPlanRouter from './mealPlanRoutes';
 import nutritionRouter from './nutritionRoutes';
 import adminRouter from './adminRoutes';
+import shoppingListRouter from './shoppingListRoutes';
 
 const apiRouter = Router();
 
@@ -25,6 +26,7 @@ apiRouter.use('/recipes', recipeRouter);
 apiRouter.use('/meal-plans', mealPlanRouter);
 apiRouter.use('/nutrition', nutritionRouter);
 apiRouter.use('/admin', adminRouter);
+apiRouter.use('/shopping-lists', shoppingListRouter);
 apiRouter.use('/storage-locations', storageRouter);
 apiRouter.use('/storage', storageRouter);
 apiRouter.use('/ai', aiRouter);

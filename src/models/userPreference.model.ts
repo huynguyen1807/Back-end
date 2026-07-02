@@ -18,7 +18,7 @@ const userPreferenceSchema = new Schema(
     defaultMealTypes: [
       {
         type: String,
-        enum: ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']
+        enum: ['BREAKFAST', 'LUNCH', 'AFTERNOON', 'DINNER', 'LATE_NIGHT', 'SNACK']
       }
     ]
   },
