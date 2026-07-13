@@ -18,20 +18,44 @@ export const updateUserProfile = async (userId: string, updateData: any) => {
 };
 
 export const updateUserPreferences = async (userId: string, preferencesData: any) => {
-  const { dietaryGoals, allergies, dislikedIngredients, measurementSystem, language, pushNotifications, emailNotifications } = preferencesData;
+  const updateData: any = {};
+
+  if (preferencesData.dietaryGoal !== undefined) {
+    updateData.dietaryGoal = preferencesData.dietaryGoal;
+  } else if (preferencesData.dietaryGoals !== undefined) {
+    updateData.dietaryGoal = preferencesData.dietaryGoals;
+  }
+
+  if (preferencesData.calorieTarget !== undefined) {
+    updateData.calorieTarget = Number(preferencesData.calorieTarget);
+  }
+
+  if (preferencesData.dislikedFoods !== undefined) {
+    updateData.dislikedFoods = preferencesData.dislikedFoods;
+  } else if (preferencesData.dislikedIngredients !== undefined) {
+    updateData.dislikedFoods = preferencesData.dislikedIngredients;
+  }
+
+  if (preferencesData.allergies !== undefined) {
+    updateData.allergies = preferencesData.allergies;
+  }
+
+  if (preferencesData.preferredCuisines !== undefined) {
+    updateData.preferredCuisines = preferencesData.preferredCuisines;
+  }
+
+  if (preferencesData.numberOfPeople !== undefined) {
+    updateData.numberOfPeople = Number(preferencesData.numberOfPeople);
+  }
+
+  if (preferencesData.defaultMealTypes !== undefined) {
+    updateData.defaultMealTypes = preferencesData.defaultMealTypes;
+  }
 
   // Find and update, or create if not exists (upsert)
   const preferences = await UserPreference.findOneAndUpdate(
     { userId },
-    {
-      dietaryGoals,
-      allergies,
-      dislikedIngredients,
-      measurementSystem,
-      language,
-      pushNotifications,
-      emailNotifications
-    },
+    updateData,
     { new: true, upsert: true, runValidators: true }
   );
 
