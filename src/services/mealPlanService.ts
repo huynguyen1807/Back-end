@@ -1,5 +1,3 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-
 import { MealPlan } from '../models/mealPlan.model';
 import { FoodItem } from '../models/foodItem.model';
 import { AIGeneratedData } from '../models/aiGeneratedData.model';
@@ -13,6 +11,12 @@ import {
   resolveNutritionForFood,
   startOfDay
 } from './nutritionService';
+import {
+  AiRecipeDraft,
+  AvailabilityStatus,
+  generateAiRecipeDrafts,
+  MealCalorieAllocation
+} from './aiRecipeProvider';
 
 type InventoryPriorityFood = {
   _id: any;
@@ -32,15 +36,6 @@ type InventoryPriorityFood = {
   };
 };
 
-type AvailabilityStatus = 'ENOUGH_INGREDIENTS' | 'MISSING_INGREDIENTS';
-
-type MealCalorieAllocation = {
-  mealType: string;
-  min: number;
-  max: number;
-  target: number;
-};
-
 type RecipeAvailabilityAnalysis = {
   status: AvailabilityStatus;
   matchedIngredients: string[];
@@ -51,36 +46,6 @@ type RecipeAvailabilityAnalysis = {
     categoryId?: any;
     categoryName?: string;
   }>;
-};
-
-type AiRecipeDraft = {
-  recipeName?: string;
-  description?: string;
-  mealType?: string;
-  availabilityStatus?: AvailabilityStatus;
-  calories?: number;
-  macroSummary?: {
-    protein?: number;
-    carbs?: number;
-    fat?: number;
-  };
-  ingredients?: Array<{
-    ingredientName?: string;
-    quantity?: number;
-    unit?: string;
-    isRequired?: boolean;
-  }>;
-  missingIngredients?: Array<{
-    ingredientName?: string;
-    quantity?: number;
-    unit?: string;
-    categoryName?: string;
-  }>;
-  steps?: string[];
-  cookingSteps?: string[];
-  cookingTime?: number;
-  difficulty?: 'EASY' | 'MEDIUM' | 'HARD';
-  priorityReasons?: string[];
 };
 
 function normalizeRecipeId(value: any) {
@@ -198,7 +163,7 @@ export async function updateMealPlan(planId: string, userId: string, data: any) 
     meals: data.meals || existing.meals
   });
 
-  return MealPlan.findByIdAndUpdate(planId, payload, { new: true })
+  return MealPlan.findByIdAndUpdate(planId, payload, { returnDocument: 'after' })
     .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
 }
 
@@ -234,24 +199,6 @@ function normalize(value: string) {
   return value.trim().toLowerCase();
 }
 
-function getGenAI(): GoogleGenerativeAI | null {
-  const apiKey = process.env.GEMINI_API_KEY || '';
-  const hasApiKey = apiKey && apiKey !== 'your_actual_api_key_here';
-  return hasApiKey ? new GoogleGenerativeAI(apiKey) : null;
-}
-
-function parseJsonFromAiText<T>(text: string, fallback: T): T {
-  try {
-    const cleanText = text
-      .replace(/```json/g, '')
-      .replace(/```/g, '')
-      .trim();
-    return JSON.parse(cleanText);
-  } catch (error) {
-    return fallback;
-  }
-}
-
 function hasMacroValue(macroSummary: any) {
   return (
     Number(macroSummary?.protein) > 0 ||
@@ -280,11 +227,11 @@ function isBlockedByPreference(foodName: string, preference: any) {
 
 function buildPriorityReason(food: InventoryPriorityFood, calorieTarget: number, weather?: string) {
   const reasons = [];
-  if (food.daysUntilExpiry <= 1) reasons.push('Use today');
-  else if (food.daysUntilExpiry <= 3) reasons.push('Near expiry');
+  if (food.daysUntilExpiry <= 1) reasons.push('Nên dùng hôm nay');
+  else if (food.daysUntilExpiry <= 3) reasons.push('Sắp hết hạn');
   if ((food.calories || 0) > 0) reasons.push(`${Math.round(food.calories || 0)} kcal`);
-  if (weather) reasons.push(`Weather: ${weather}`);
-  if (calorieTarget) reasons.push(`Target ${calorieTarget} kcal/day`);
+  if (weather) reasons.push(`Thời tiết: ${weather}`);
+  if (calorieTarget) reasons.push(`Mục tiêu ${calorieTarget} kcal/ngày`);
   return reasons;
 }
 
@@ -407,12 +354,12 @@ function findAllocationForCalories(
 
 function getMealTypeLabel(mealType: string) {
   const labels: Record<string, string> = {
-    BREAKFAST: 'bua sang',
-    LUNCH: 'bua trua',
-    AFTERNOON: 'bua chieu',
-    DINNER: 'bua toi',
-    LATE_NIGHT: 'bua khuya',
-    SNACK: 'bua phu'
+    BREAKFAST: 'bữa sáng',
+    LUNCH: 'bữa trưa',
+    AFTERNOON: 'bữa chiều',
+    DINNER: 'bữa tối',
+    LATE_NIGHT: 'bữa khuya',
+    SNACK: 'bữa phụ'
   };
   return labels[mealType] || mealType.toLowerCase();
 }
@@ -428,8 +375,12 @@ function findMatchingFood(ingredient: any, foods: InventoryPriorityFood[]) {
     if (!matchesIngredient(food.foodName, ingredient.ingredientName)) return false;
     const requiredQty = Number(ingredient.quantity) || 0;
     const availableQty = Number(food.quantity) || 0;
+    const foodUnit = normalize(food.unit || '');
+    const ingredientUnit = normalize(ingredient.unit || '');
+    const unitMatches = !foodUnit || !ingredientUnit || foodUnit === ingredientUnit;
+    if (!unitMatches) return false;
     if (requiredQty <= 0) return availableQty > 0;
-    return availableQty >= requiredQty || normalize(food.unit || '') !== normalize(ingredient.unit || '');
+    return availableQty >= requiredQty;
   });
 }
 
@@ -524,6 +475,22 @@ function buildStepSignature(steps: any[] = []) {
     .join('|');
 }
 
+function hashText(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function buildFormulaSignature(ingredients: any[] = [], steps: any[] = []) {
+  return `${buildIngredientSignature(ingredients)}::${buildStepSignature(steps)}`;
+}
+
+function buildFormulaTag(ingredients: any[] = [], steps: any[] = []) {
+  return `FORMULA:${hashText(buildFormulaSignature(ingredients, steps))}`;
+}
+
 async function findExistingRecipeBySignature(
   userId: string,
   signature: string,
@@ -542,12 +509,13 @@ async function findExistingRecipeBySignature(
   return candidates.find((recipe: any) => {
     const recipeTags = recipe.tags || [];
     const sameName = recipeName && normalize(recipe.recipeName || '') === normalize(recipeName);
+    const sameIngredients = signature &&
+      buildIngredientSignature(recipe.ingredients || []) === signature;
     const sameSteps = stepSignature &&
       buildStepSignature(recipe.cookingSteps || []) === stepSignature;
     return recipeTags.includes(signatureTag) ||
-      buildIngredientSignature(recipe.ingredients || []) === signature ||
       sameName ||
-      sameSteps;
+      (sameIngredients && sameSteps);
   });
 }
 
@@ -559,7 +527,7 @@ function choosePrimaryFood(foods: InventoryPriorityFood[]) {
 
 function buildGeneratedRecipeName(foods: InventoryPriorityFood[], mealType: string) {
   const primary = choosePrimaryFood(foods);
-  if (!primary) return 'Món gợi ý từ inventory';
+  if (!primary) return 'Món gợi ý từ tủ thực phẩm';
   const others = foods.filter((food) => String(food._id) !== String(primary?._id));
   const sideNames = others.slice(0, 2).map((food) => food.foodName);
   const groups = new Set(foods.map(getFoodGroup));
@@ -573,7 +541,7 @@ function buildGeneratedRecipeName(foods: InventoryPriorityFood[], mealType: stri
   }
 
   if (groups.has('carb') && foods.length >= 2) {
-    return `${primary.foodName} bowl ${sideNames.join(' và ')}`.trim();
+    return `${primary.foodName} trộn ${sideNames.join(' và ')}`.trim();
   }
 
   if (groups.has('protein') && sideNames.length) {
@@ -587,22 +555,29 @@ function buildGeneratedRecipeName(foods: InventoryPriorityFood[], mealType: stri
   return `Món ${primary.foodName}`;
 }
 
-function buildCookingSteps(recipeName: string, foods: InventoryPriorityFood[]) {
+function buildCookingSteps(recipeName: string, foods: InventoryPriorityFood[], variant = 0) {
   const names = foods.map((food) => food.foodName).join(', ');
   const primary = choosePrimaryFood(foods);
   const primaryName = primary?.foodName || 'nguyên liệu chính';
+  const techniqueSteps = [
+    `Nấu chín ${primaryName} với lượng vừa đủ.`,
+    `Áp chảo ${primaryName} đến khi chín thơm.`,
+    `Nấu ${primaryName} thành phần nền mềm và dễ ăn.`,
+    `Trộn ${primaryName} với rau/gia vị theo khẩu vị.`,
+    `Làm nóng chảo, đảo nhanh ${primaryName} để giữ độ tươi.`
+  ];
 
   return [
     `Sơ chế ${names}.`,
-    `Nấu chín ${primaryName} với lượng vừa đủ.`,
+    techniqueSteps[variant % techniqueSteps.length],
     'Kết hợp các nguyên liệu còn lại, nêm gia vị theo khẩu vị.',
     `Trình bày và dùng ngay món ${recipeName}.`
   ];
 }
 
-function buildSmartFallbackRecipeName(foods: InventoryPriorityFood[], mealType: string) {
+function buildSmartFallbackRecipeName(foods: InventoryPriorityFood[], mealType: string, variant = 0) {
   const primary = choosePrimaryFood(foods);
-  if (!primary) return 'Mon ngon tu inventory';
+  if (!primary) return 'Món ngon từ tủ thực phẩm';
 
   const grouped = foods.reduce<Record<string, InventoryPriorityFood[]>>((acc, food) => {
     const group = getFoodGroup(food);
@@ -614,27 +589,106 @@ function buildSmartFallbackRecipeName(foods: InventoryPriorityFood[], mealType: 
   const vegetable = grouped.vegetable?.[0]?.foodName;
   const fruit = grouped.fruit?.[0]?.foodName;
   const dairy = grouped.dairy?.[0]?.foodName;
+  const secondary = vegetable || carb || fruit || dairy;
 
   if (['SNACK', 'AFTERNOON', 'LATE_NIGHT'].includes(mealType) && (fruit || dairy)) {
-    if (fruit && dairy) return `Sua chua ${fruit}`;
-    if (fruit) return `Sinh to ${fruit}`;
-    if (dairy) return `${dairy} ngu coc`;
+    const names = [
+      fruit && dairy ? `Sữa chua ${fruit}` : '',
+      fruit ? `Sinh tố ${fruit}` : '',
+      fruit ? `Salad trái cây ${fruit}` : '',
+      dairy ? `${dairy} ngũ cốc` : '',
+      fruit ? `${fruit} dầm sữa chua` : ''
+    ].filter(Boolean);
+    return names[variant % names.length] || `Sữa chua ${primary.foodName}`;
   }
 
-  if (protein && carb && vegetable) return `${protein} ap chao an kem ${carb}`;
-  if (protein && vegetable) return `${protein} xao rau cu`;
-  if (protein && carb) return `${protein} sot nhe an kem ${carb}`;
-  if (carb && vegetable) return `${carb} rau cu`;
-  if (protein) return `${protein} ap chao`;
-  if (vegetable) return `Salad ${vegetable}`;
-  if (fruit) return `Salad trai cay ${fruit}`;
+  if (protein && carb && vegetable) {
+    const names = [
+      `${protein} áp chảo ăn kèm ${carb}`,
+      `Cơm ${protein} rau củ`,
+      `${protein} sốt nhẹ ăn kèm ${carb}`,
+      `Bát ${carb} ${protein} cân bằng`,
+      `${protein} cuộn rau xanh`
+    ];
+    return names[variant % names.length];
+  }
 
-  return `${primary.foodName} che bien nhanh`;
+  if (protein && vegetable) {
+    const names = [
+      `${protein} xào rau củ`,
+      `${protein} áp chảo rau xanh`,
+      `Canh ${protein} rau củ`,
+      `Salad ${protein} rau xanh`,
+      `${protein} cuộn rau củ`
+    ];
+    return names[variant % names.length];
+  }
+
+  if (protein && carb) {
+    const names = [
+      `${protein} sốt nhẹ ăn kèm ${carb}`,
+      `${carb} trộn ${protein}`,
+      `Cháo ${protein}`,
+      `${protein} áp chảo ăn kèm ${carb}`,
+      `Bát ${carb} ${protein}`
+    ];
+    return names[variant % names.length];
+  }
+
+  if (carb && vegetable) {
+    const names = [
+      `${carb} rau củ`,
+      `${carb} trộn rau xanh`,
+      `Cháo ${carb} rau củ`,
+      `Bát ${carb} thanh đạm`,
+      `${vegetable} ăn kèm ${carb}`
+    ];
+    return names[variant % names.length];
+  }
+
+  if (protein) {
+    const names = [
+      `${protein} áp chảo`,
+      `${protein} sốt gừng nhẹ`,
+      `Canh ${protein}`,
+      `${protein} nướng áp chảo`,
+      `${protein} trộn rau thơm`
+    ];
+    return names[variant % names.length];
+  }
+
+  if (vegetable) return `Salad ${vegetable}`;
+  if (fruit) return `Salad trái cây ${fruit}`;
+  if (secondary) return `${primary.foodName} ăn kèm ${secondary}`;
+
+  return `${primary.foodName} chế biến nhanh`;
+}
+
+function getUniqueFallbackName(
+  foods: InventoryPriorityFood[],
+  mealType: string,
+  usedNames: Set<string>,
+  startVariant: number
+) {
+  for (let offset = 0; offset < 8; offset += 1) {
+    const variant = startVariant + offset;
+    const recipeName = buildSmartFallbackRecipeName(foods, mealType, variant);
+    const normalizedName = normalize(recipeName);
+    if (!usedNames.has(normalizedName)) {
+      usedNames.add(normalizedName);
+      return { recipeName, variant };
+    }
+  }
+
+  const variant = startVariant + usedNames.size;
+  const recipeName = buildSmartFallbackRecipeName(foods, mealType, variant);
+  usedNames.add(normalize(recipeName));
+  return { recipeName, variant };
 }
 
 function buildComboPriorityReasons(foods: InventoryPriorityFood[], calorieTarget: number, weather?: string) {
   const reasons = new Set<string>();
-  if (foods.length > 1) reasons.add(`Kết hợp ${foods.length} thực phẩm trong inventory`);
+  if (foods.length > 1) reasons.add(`Kết hợp ${foods.length} thực phẩm trong tủ`);
   foods.forEach((food) => buildPriorityReason(food, calorieTarget, weather).forEach((reason) => reasons.add(reason)));
   return Array.from(reasons).slice(0, 6);
 }
@@ -704,143 +758,18 @@ function selectFoodCombo(
   return fallback ? [fallback] : [unusedFoods[0]];
 }
 
-function buildAiRecipePrompt(input: {
-  priorityFoods: InventoryPriorityFood[];
-  allocations: MealCalorieAllocation[];
-  preference: any;
-  calorieMin: number;
-  calorieMax: number;
-  calorieTarget: number;
-  weather?: string;
-}) {
-  const inventory = input.priorityFoods.slice(0, 30).map((food) => ({
-    foodName: food.foodName,
-    categoryName: food.categoryName,
-    quantity: food.quantity,
-    unit: food.unit,
-    status: food.status,
-    daysUntilExpiry: food.daysUntilExpiry,
-    calories: food.calories,
-    macroSummary: food.macroSummary
-  }));
-
-  return `You are a smart Vietnamese meal-planning chef.
-Create recipe recommendations from this user inventory. Use realistic cooking knowledge and common recipe standards.
-
-Hard rules:
-- Return raw JSON only. No markdown.
-- Recipe names must be natural dish names in Vietnamese or readable Vietnamese without patterns like "A + B", "A ket hop B", "Breakfast with ...", "Lunch with ...".
-- Make recipes diverse. Do not repeat the same formula.
-- For ENOUGH_INGREDIENTS recipes, only use available inventory ingredients and do not require missing items.
-- For MISSING_INGREDIENTS recipes, you may add reasonable missing ingredients, but include all ingredients in the recipe.
-- Calories must target the provided meal slot allocation. The total selected slots should stay in the daily range ${input.calorieMin}-${Number.isFinite(input.calorieMax) ? input.calorieMax : 'unlimited'} kcal.
-- Prefer near-expiry foods, user preferences, and balanced macros.
-
-User preferences:
-${JSON.stringify(input.preference || {}, null, 2)}
-
-Weather context:
-${input.weather || 'not provided'}
-
-Meal calorie allocations:
-${JSON.stringify(input.allocations, null, 2)}
-
-Inventory:
-${JSON.stringify(inventory, null, 2)}
-
-Return a JSON array with 2 recipes per meal slot if possible. Each object:
-{
-  "recipeName": "natural dish name",
-  "description": "short Vietnamese description",
-  "mealType": "BREAKFAST | LUNCH | AFTERNOON | DINNER | LATE_NIGHT",
-  "availabilityStatus": "ENOUGH_INGREDIENTS | MISSING_INGREDIENTS",
-  "calories": estimated recipe kcal,
-  "macroSummary": { "protein": grams, "carbs": grams, "fat": grams },
-  "ingredients": [
-    { "ingredientName": "name", "quantity": number, "unit": "g|ml|item|serving", "isRequired": true }
-  ],
-  "missingIngredients": [
-    { "ingredientName": "name", "quantity": number, "unit": "g|ml|item|serving", "categoryName": "optional category" }
-  ],
-  "steps": ["step 1", "step 2", "step 3"],
-  "cookingTime": number,
-  "difficulty": "EASY | MEDIUM | HARD",
-  "priorityReasons": ["reason"]
-}`;
-}
-
-async function generateAiRecipeDrafts(input: {
-  priorityFoods: InventoryPriorityFood[];
-  allocations: MealCalorieAllocation[];
-  preference: any;
-  calorieMin: number;
-  calorieMax: number;
-  calorieTarget: number;
-  weather?: string;
-}): Promise<AiRecipeDraft[]> {
-  const genAI = getGenAI();
-  if (!genAI || !input.priorityFoods.length) return [];
-
-  try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const response = await model.generateContent(buildAiRecipePrompt(input));
-    return normalizeAiRecipeDrafts(
-      parseJsonFromAiText<AiRecipeDraft[]>(response.response.text(), []),
-      input.allocations
-    );
-  } catch (error: any) {
-    console.error('[GEMINI smart meal recipe error]', error.message);
-    return [];
-  }
-}
-
-function normalizeAiRecipeDrafts(
-  drafts: AiRecipeDraft[],
-  allocations: MealCalorieAllocation[]
-): AiRecipeDraft[] {
-  const validMealTypes = new Set(allocations.map((allocation) => allocation.mealType));
-
-  return (Array.isArray(drafts) ? drafts : [])
-    .map((draft, index) => {
-      const mealType = validMealTypes.has(String(draft.mealType))
-        ? String(draft.mealType)
-        : allocations[index % Math.max(1, allocations.length)]?.mealType;
-      const availabilityStatus: AvailabilityStatus =
-        draft.availabilityStatus === 'MISSING_INGREDIENTS'
-          ? 'MISSING_INGREDIENTS'
-          : 'ENOUGH_INGREDIENTS';
-
-      return {
-        ...draft,
-        mealType,
-        availabilityStatus,
-        calories: Number(draft.calories) || undefined,
-        macroSummary: draft.macroSummary
-          ? {
-              protein: Number(draft.macroSummary.protein) || 0,
-              carbs: Number(draft.macroSummary.carbs) || 0,
-              fat: Number(draft.macroSummary.fat) || 0
-            }
-          : undefined,
-        steps: Array.isArray(draft.steps) ? draft.steps : draft.cookingSteps
-      };
-    })
-    .filter(
-      (draft) =>
-        Boolean(String(draft.recipeName || '').trim()) &&
-        Boolean(draft.mealType) &&
-        (Array.isArray(draft.ingredients) || Array.isArray(draft.missingIngredients))
-    );
-}
-
 function buildFallbackRecipeDrafts(
   priorityFoods: InventoryPriorityFood[],
   allocations: MealCalorieAllocation[],
   calorieTarget: number,
-  weather?: string
+  weather?: string,
+  existingRecipes: any[] = []
 ): AiRecipeDraft[] {
   const drafts: AiRecipeDraft[] = [];
   const usedFoodIds = new Set<string>();
+  const usedNames = new Set<string>(
+    existingRecipes.map((recipe) => normalize(recipe.recipeName || '')).filter(Boolean)
+  );
 
   allocations.forEach((allocation, index) => {
     const combo = selectFoodCombo(
@@ -855,14 +784,19 @@ function buildFallbackRecipeDrafts(
 
     combo.forEach((food) => usedFoodIds.add(String(food._id)));
     if (combo.length) {
-      const recipeName = buildSmartFallbackRecipeName(combo, allocation.mealType);
+      const { recipeName, variant } = getUniqueFallbackName(
+        combo,
+        allocation.mealType,
+        usedNames,
+        index
+      );
       drafts.push({
         recipeName,
-        description: `Recipe generated from available inventory for ${getMealTypeLabel(allocation.mealType)}.`,
+        description: `Công thức gợi ý từ thực phẩm hiện có cho ${getMealTypeLabel(allocation.mealType)}.`,
         mealType: allocation.mealType,
         availabilityStatus: 'ENOUGH_INGREDIENTS',
         ingredients: combo.map(buildIngredientFromFood),
-        cookingSteps: buildCookingSteps(recipeName, combo),
+        cookingSteps: buildCookingSteps(recipeName, combo, variant),
         cookingTime: ['AFTERNOON', 'LATE_NIGHT'].includes(allocation.mealType) ? 10 : 20,
         difficulty: 'EASY',
         priorityReasons: buildComboPriorityReasons(combo, calorieTarget, weather)
@@ -871,13 +805,17 @@ function buildFallbackRecipeDrafts(
 
     const baseFood = combo[0] || priorityFoods[index % Math.max(1, priorityFoods.length)];
     if (baseFood) {
-      const extraName = getFoodGroup(baseFood) === 'fruit' ? 'yogurt' : 'rau xanh';
+      const extraName = getFoodGroup(baseFood) === 'fruit' ? 'sữa chua' : 'rau xanh';
+      const missingNameBase = getFoodGroup(baseFood) === 'fruit'
+        ? `Sữa chua ${baseFood.foodName}`
+        : `${baseFood.foodName} sốt rau củ`;
+      const missingName = usedNames.has(normalize(missingNameBase))
+        ? getUniqueFallbackName([baseFood], allocation.mealType, usedNames, index + 3).recipeName
+        : missingNameBase;
+      usedNames.add(normalize(missingName));
       drafts.push({
-        recipeName:
-          getFoodGroup(baseFood) === 'fruit'
-            ? `Sua chua ${baseFood.foodName}`
-            : `${baseFood.foodName} sot rau cu`,
-        description: 'Recipe suggestion may need a few extra ingredients from shopping list.',
+        recipeName: missingName,
+        description: 'Công thức có thể cần mua thêm vài nguyên liệu để món ăn đầy đủ hơn.',
         mealType: allocation.mealType,
         availabilityStatus: 'MISSING_INGREDIENTS',
         ingredients: [
@@ -885,13 +823,13 @@ function buildFallbackRecipeDrafts(
           { ingredientName: extraName, quantity: 1, unit: 'serving', isRequired: true }
         ],
         cookingSteps: [
-          `So che ${baseFood.foodName}.`,
-          `Chuan bi ${extraName} va gia vi vua an.`,
-          'Che bien nhanh, trinh bay gon va dung ngay.'
+          `Sơ chế ${baseFood.foodName}.`,
+          `Chuẩn bị ${extraName} và gia vị vừa ăn.`,
+          'Chế biến nhanh, trình bày gọn và dùng ngay.'
         ],
         cookingTime: 15,
         difficulty: 'EASY',
-        priorityReasons: ['Can mua them nguyen lieu de mon an day du hon']
+        priorityReasons: ['Cần mua thêm nguyên liệu để món ăn đầy đủ hơn']
       });
     }
   });
@@ -980,13 +918,19 @@ async function fitIngredientsToAllocation(
 }
 
 function dedupeRecommendations(items: any[]) {
-  const seen = new Set<string>();
+  const seenNames = new Set<string>();
+  const seenFormulaSignatures = new Set<string>();
   return items.filter((item) => {
-    const signature = buildIngredientSignature(item.recipe?.ingredients || []);
-    const stepSignature = buildStepSignature(item.recipe?.cookingSteps || []);
-    const key = `${normalize(item.recipe?.recipeName || '')}:${signature}:${stepSignature}`;
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
+    const recipeName = normalize(item.recipe?.recipeName || '');
+    const formulaSignature = buildFormulaSignature(
+      item.recipe?.ingredients || [],
+      item.recipe?.cookingSteps || []
+    );
+    if (!recipeName && !formulaSignature) return false;
+    if (recipeName && seenNames.has(recipeName)) return false;
+    if (formulaSignature && seenFormulaSignatures.has(formulaSignature)) return false;
+    if (recipeName) seenNames.add(recipeName);
+    if (formulaSignature) seenFormulaSignatures.add(formulaSignature);
     return true;
   });
 }
@@ -997,8 +941,8 @@ async function buildGeneratedRecipe(userId: string, foods: InventoryPriorityFood
   const recipeName = buildSmartFallbackRecipeName(foods, mealType);
   const cookingSteps = buildCookingSteps(recipeName, foods);
   const priorityReasons = buildComboPriorityReasons(foods, Number(data.calorieTarget || 0), data.weather);
-  const signature = buildRecipeSignature(foods);
-  const signatureTag = `FORMULA:${signature}`;
+  const signature = buildIngredientSignature(ingredients);
+  const signatureTag = buildFormulaTag(ingredients, cookingSteps);
   const existingRecipe = await findExistingRecipeBySignature(
     userId,
     signature,
@@ -1029,7 +973,7 @@ async function buildGeneratedRecipe(userId: string, foods: InventoryPriorityFood
         },
     {
       recipeName,
-      description: `AI suggestion generated from inventory: ${foods.map((food) => food.foodName).join(', ')}. ${priorityReasons.join(' - ')}`,
+      description: `Gợi ý từ tủ thực phẩm: ${foods.map((food) => food.foodName).join(', ')}. ${priorityReasons.join(' - ')}`,
       cookingSteps,
       cookingTime: ['SNACK', 'AFTERNOON', 'LATE_NIGHT'].includes(mealType) ? 10 : 20,
       difficulty: 'EASY',
@@ -1041,7 +985,7 @@ async function buildGeneratedRecipe(userId: string, foods: InventoryPriorityFood
       createdBy: userId,
       isActive: true
     },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
   );
 }
 
@@ -1095,7 +1039,7 @@ async function buildGeneratedRecipeFromDraft(
       ? draft.cookingSteps.slice(0, 8)
       : buildCookingSteps(recipeName, fallbackFoods);
   const signature = buildIngredientSignature(ingredients);
-  const signatureTag = `FORMULA:${signature}`;
+  const signatureTag = buildFormulaTag(ingredients, cookingSteps);
   const existingRecipe = await findExistingRecipeBySignature(
     userId,
     signature,
@@ -1116,7 +1060,7 @@ async function buildGeneratedRecipeFromDraft(
     recipeName,
     description:
       draft.description ||
-      `AI recipe for ${getMealTypeLabel(draftMealType)}. Target ${allocation.target} kcal.`,
+      `Công thức gợi ý cho ${getMealTypeLabel(draftMealType)}. Mục tiêu khoảng ${allocation.target} kcal.`,
     cookingSteps,
     cookingTime: Number(draft.cookingTime) > 0 ? Number(draft.cookingTime) : 20,
     difficulty: draft.difficulty || 'EASY',
@@ -1145,7 +1089,7 @@ async function buildGeneratedRecipeFromDraft(
           tags: signatureTag
         },
     recipePayload,
-    { new: true, upsert: true, setDefaultsOnInsert: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
   );
 
   return buildRecommendation(recipe, {
@@ -1227,6 +1171,15 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     calorieMax,
     calorieTarget
   );
+  const recipes = await Recipe.find({
+    isActive: true,
+    $or: [
+      { sourceType: 'SYSTEM' },
+      { createdBy: userId }
+    ]
+  });
+  const avoidRecipes = Array.isArray(data.avoidRecipes) ? data.avoidRecipes : [];
+  const recipeReferences = [...avoidRecipes, ...recipes];
   const aiDrafts = await generateAiRecipeDrafts({
     priorityFoods,
     allocations: calorieAllocations,
@@ -1234,23 +1187,35 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     calorieMin,
     calorieMax,
     calorieTarget,
+    bmiProfile: data.bmiProfile,
+    existingRecipes: recipeReferences,
     weather: data.weather
   });
   const fallbackDrafts = buildFallbackRecipeDrafts(
     priorityFoods,
     calorieAllocations,
     calorieTarget,
-    data.weather
+    data.weather,
+    recipeReferences
   );
   const draftPool = aiDrafts.length ? [...aiDrafts, ...fallbackDrafts] : fallbackDrafts;
   const generatedRecommendations = [];
+  const usedDraftKeys = new Set<string>();
 
   for (const allocation of calorieAllocations) {
     const mealDrafts = draftPool
       .filter((draft) => !draft.mealType || draft.mealType === allocation.mealType)
-      .slice(0, 4);
+      .filter((draft) => {
+        const draftKey = `${normalize(draft.recipeName || '')}:${buildIngredientSignature(draft.ingredients || [])}:${buildStepSignature(draft.steps || draft.cookingSteps || [])}`;
+        return !usedDraftKeys.has(draftKey);
+      })
+      .slice(0, 5);
+    let acceptedForAllocation = 0;
+    let closestOutOfRange: any = null;
+    let closestOutOfRangeKey = '';
 
     for (const draft of mealDrafts) {
+      const draftKey = `${normalize(draft.recipeName || '')}:${buildIngredientSignature(draft.ingredients || [])}:${buildStepSignature(draft.steps || draft.cookingSteps || [])}`;
       const recommendation = await buildGeneratedRecipeFromDraft(
         userId,
         { ...draft, mealType: allocation.mealType },
@@ -1266,19 +1231,27 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
         recipeCalories > 0 &&
         !isWithinCalorieRange(recipeCalories, allocation.min, allocation.max)
       ) {
+        const distance = Math.min(
+          Math.abs(recipeCalories - allocation.min),
+          Number.isFinite(allocation.max) ? Math.abs(recipeCalories - allocation.max) : 0
+        );
+        if (!closestOutOfRange || distance < closestOutOfRange.distance) {
+          closestOutOfRange = { recommendation, distance };
+          closestOutOfRangeKey = draftKey;
+        }
         continue;
       }
+      usedDraftKeys.add(draftKey);
       generatedRecommendations.push(recommendation);
+      acceptedForAllocation += 1;
+    }
+
+    if (!acceptedForAllocation && closestOutOfRange) {
+      usedDraftKeys.add(closestOutOfRangeKey);
+      generatedRecommendations.push(closestOutOfRange.recommendation);
     }
   }
 
-  const recipes = await Recipe.find({
-    isActive: true,
-    $or: [
-      { sourceType: 'SYSTEM' },
-      { createdBy: userId }
-    ]
-  });
   const scoredRecipes = recipes
     .map((recipe) => {
       const scoring = recipeInventoryScore(recipe, foods);
@@ -1308,8 +1281,8 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
           expiryDate: food.expiryDate
         })),
         priorityReasons: item.matchedFoods.some((food) => food.status === 'NEAR_EXPIRY')
-          ? ['Near expiry match']
-          : ['Inventory match'],
+          ? ['Phù hợp thực phẩm sắp hết hạn']
+          : ['Phù hợp với tủ thực phẩm'],
         availabilityStatus: item.availability.status,
         matchedIngredients: item.availability.matchedIngredients,
         missingIngredients: item.availability.missingIngredients,
@@ -1353,19 +1326,19 @@ export async function extractRecipeFromVideo(userId: string, data: any = {}) {
     .map((part) => part.replace(/\d+/g, '').trim())
     .filter((part) => part.length > 2);
 
-  const recipeName = data.recipeName || readableTokens.join(' ') || 'Video extracted recipe';
+  const recipeName = data.recipeName || readableTokens.join(' ') || 'Công thức trích xuất từ video';
   const extractedIngredients = Array.isArray(data.ingredients) && data.ingredients.length
     ? data.ingredients
     : [
-        { ingredientName: 'Main ingredient', quantity: 1, unit: 'serving' },
-        { ingredientName: 'Seasoning', quantity: 1, unit: 'serving' }
+        { ingredientName: 'Nguyên liệu chính', quantity: 1, unit: 'serving' },
+        { ingredientName: 'Gia vị', quantity: 1, unit: 'serving' }
       ];
 
   const source = await VideoRecipeSource.create({
     userId,
     videoUrl,
     platform,
-    extractedText: data.extractedText || `Recipe draft extracted from ${platform} video.`,
+    extractedText: data.extractedText || `Bản nháp công thức được trích xuất từ video ${platform}.`,
     extractedIngredients,
     missingIngredients: [],
     status: 'SUCCESS'
@@ -1373,7 +1346,7 @@ export async function extractRecipeFromVideo(userId: string, data: any = {}) {
 
   const generatedRecipe = {
     recipeName,
-    description: `Draft extracted from ${platform} video.`,
+    description: `Bản nháp công thức được trích xuất từ video ${platform}.`,
     ingredients: extractedIngredients,
     sourceType: 'VIDEO_EXTRACTED',
     videoSourceId: source._id,
