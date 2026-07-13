@@ -113,7 +113,7 @@ export async function updateRecipe(recipeId: string, userId: string, data: any, 
   const payload = await buildRecipePayload(merged, userId, isAdmin);
   delete payload.createdBy;
 
-  return Recipe.findByIdAndUpdate(recipeId, payload, { new: true })
+  return Recipe.findByIdAndUpdate(recipeId, payload, { returnDocument: 'after' })
     .populate('createdBy', 'fullName email role');
 }
 

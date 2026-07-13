@@ -5,6 +5,8 @@ import { ScanResult } from '../models/scanResult.model';
 import { AIPrediction } from '../models/aiPrediction.model';
 import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
+import { normalizeFoodText } from '../utils/foodCategoryValidation';
+import { recognizeFoodFromImage } from '../services/scanRecognitionService';
 
 // Initialize Google Gemini lazily to avoid import hoisting issues
 function getGenAI(): GoogleGenerativeAI | null {
@@ -16,21 +18,31 @@ function getGenAI(): GoogleGenerativeAI | null {
   return new GoogleGenerativeAI(apiKey);
 }
 
+function getGeminiModelName() {
+  return (
+    process.env.GEMINI_MODEL ||
+    process.env.GEMINI_MODELS?.split(',')[0] ||
+    'gemini-2.0-flash-lite'
+  ).trim();
+}
+
 // Helpers to auto-provision categories and storage locations
 async function getOrCreateCategory(categoryName: string, userId: string): Promise<string> {
   const normalizedName = (categoryName || 'Khác').trim();
-  let category = await FoodCategory.findOne({
-    categoryName: { $regex: new RegExp(`^${normalizedName}$`, 'i') }
+  const normalizedKey = normalizeFoodText(normalizedName);
+  const categories = await FoodCategory.find({}).select('categoryName displayName').lean();
+  const existing = categories.find((category: any) => {
+    return normalizeFoodText(category.categoryName) === normalizedKey || normalizeFoodText(category.displayName) === normalizedKey;
   });
+  if (existing?._id) return String(existing._id);
 
-  if (!category) {
-    category = await FoodCategory.create({
-      categoryName: normalizedName,
-      description: 'Tự động tạo bởi AI',
-      isActive: true,
-      createdBy: userId
-    });
-  }
+  const category = await FoodCategory.create({
+    categoryName: normalizedName,
+    displayName: normalizedName,
+    description: 'Tự động tạo bởi AI',
+    isActive: true,
+    createdBy: userId
+  });
   return (category._id as any).toString();
 }
 
@@ -78,59 +90,45 @@ export const recognizeFoodController = async (req: AuthRequest, res: Response): 
       return;
     }
 
-    let resultJson = {
-      productName: 'Táo đỏ',
-      category: 'Trái cây',
-      confidence: 0.90
-    };
+    const validatedResult = await recognizeFoodFromImage({
+      userId,
+      imageBuffer: req.file.buffer,
+      mimeType: req.file.mimetype
+    });
 
-    const genAI = getGenAI();
+    const providerErrorCode = validatedResult.errorCode;
+    const scanStatus = providerErrorCode
+      ? 'FAILED'
+      : !validatedResult.isFood
+        ? 'NEED_MANUAL_INPUT'
+        : validatedResult.confidence < 0.65
+          ? 'LOW_CONFIDENCE'
+          : 'SUCCESS';
 
-    if (genAI) {
-      try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-        const imagePart = {
-          inlineData: {
-            data: req.file.buffer.toString('base64'),
-            mimeType: req.file.mimetype
-          }
-        };
-
-        const prompt = `Hãy nhận diện loại thực phẩm có trong hình ảnh này. 
-Trả về một đối tượng JSON duy nhất có dạng:
-{
-  "productName": "tên thực phẩm bằng tiếng Việt, ví dụ: Cà chua, Chuối, Thịt bò",
-  "category": "thể loại thực phẩm bằng tiếng Việt, ví dụ: Trái cây, Rau quả, Thịt, Hải sản, Bơ sữa, Khác",
-  "confidence": độ tin cậy từ 0.0 đến 1.0
-}
-Chú ý: Chỉ trả về nội dung JSON thô, không bọc trong thẻ markdown \`\`\`json hay bất kỳ văn bản giải thích nào khác.`;
-
-        const response = await model.generateContent([prompt, imagePart]);
-        const responseText = response.response.text().trim();
-        
-        // Strip out code block wrappers if Gemini ignored instructions
-        const cleanJsonText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-        resultJson = JSON.parse(cleanJsonText);
-      } catch (err: any) {
-        console.error('[GEMINI recognize-food error]', err.message);
-        // Fallback to default
-      }
-    } else {
-      console.warn('⚠️  [GEMINI API] Running in mock fallback mode for recognizeFood');
-      // Simulate slight delay for mock UX
-      await new Promise(resolve => setTimeout(resolve, 800));
-    }
-
-    // Save scan result history
     await ScanResult.create({
       userId,
       scanType: 'FOOD_IMAGE',
-      productName: resultJson.productName,
-      confidenceScore: resultJson.confidence,
-      status: 'SUCCESS'
+      productName: validatedResult.productName,
+      confidenceScore: validatedResult.confidence,
+      status: scanStatus,
+      categoryId: validatedResult.categoryId,
+      storageLocationId: validatedResult.storageSuggestion?.storageLocationId,
+      candidates: validatedResult.candidates,
+      warnings: validatedResult.warnings,
+      rawResult: validatedResult
     });
 
-    res.json(resultJson);
+    if (providerErrorCode) {
+      const statusCode = providerErrorCode === 'GEMINI_QUOTA_EXCEEDED' ? 429 : 503;
+      res.status(statusCode).json({
+        message: validatedResult.warnings?.[0] || 'Gemini khong kha dung de nhan dien anh.',
+        ...validatedResult
+      });
+      return;
+    }
+
+    res.json(validatedResult);
+    return;
   } catch (error: any) {
     console.error(error);
     res.status(500).json({ message: 'Lỗi nhận diện thực phẩm', error: error.message });
@@ -164,7 +162,7 @@ export const predictExpiryController = async (req: AuthRequest, res: Response): 
 
     if (genAI) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: getGeminiModelName() });
         const prompt = `Với thực phẩm là "${productName}" được bảo quản tại vị trí "${storageLocation || 'outside'}" (ví dụ: 'outside' - nhiệt độ phòng, 'fridge' - tủ lạnh, 'freezer' - ngăn đông), hãy dự đoán thời hạn bảo quản (số ngày tối đa thực phẩm còn tươi ngon tính từ ngày hôm nay ${todayStr}). 
 Trả về đối tượng JSON dạng:
 {
@@ -248,7 +246,7 @@ export const storageSuggestionsController = async (req: AuthRequest, res: Respon
 
     if (genAI) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: getGeminiModelName() });
         const prompt = `Với thực phẩm tên là "${productName}", hãy đưa ra gợi ý cách bảo quản ở các môi trường khác nhau.
 Trả về một mảng JSON (tối đa 3 gợi ý) dạng:
 [
@@ -309,7 +307,7 @@ export const mealSuggestionsController = async (req: AuthRequest, res: Response)
 
     if (genAI) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: getGeminiModelName() });
         const prefText = preferences ? ` Sở thích: ${JSON.stringify(preferences)}.` : '';
         const prompt = `Đề xuất 2-3 món ăn chế biến từ nguyên liệu chính là "${productName}".${prefText}
 Trả về mảng JSON dạng:
@@ -361,7 +359,7 @@ export const nutritionInfoController = async (req: AuthRequest, res: Response): 
 
     if (genAI) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: getGeminiModelName() });
         const prompt = `Tính toán hoặc dự đoán thành phần dinh dưỡng cho ${qty}g thực phẩm "${productName}".
 Trả về đối tượng JSON dạng:
 {
@@ -433,7 +431,7 @@ export const personalizedMenuController = async (req: AuthRequest, res: Response
 
     if (genAI && inventory && inventory.length > 0) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: getGeminiModelName() });
         const prompt = `Dựa trên danh sách các thực phẩm có sẵn này: "${itemsText}", đề xuất 2 thực phẩm có thể nấu kết hợp.
 Trả về mảng JSON dạng:
 [

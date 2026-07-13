@@ -7,7 +7,7 @@ export const updateUserProfile = async (userId: string, updateData: any) => {
   const user = await User.findByIdAndUpdate(
     userId,
     { fullName, phoneNumber, avatarUrl },
-    { new: true, runValidators: true }
+    { returnDocument: 'after', runValidators: true }
   ).select('-passwordHash');
 
   if (!user) {
@@ -56,7 +56,7 @@ export const updateUserPreferences = async (userId: string, preferencesData: any
   const preferences = await UserPreference.findOneAndUpdate(
     { userId },
     updateData,
-    { new: true, upsert: true, runValidators: true }
+    { returnDocument: 'after', upsert: true, runValidators: true }
   );
 
   return preferences;
