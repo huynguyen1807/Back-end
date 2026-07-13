@@ -49,7 +49,7 @@ export async function checkExpiryAndNotify(userId: string): Promise<number> {
       }
     } else if (expiryDay <= threeDaysFromNow) {
       // Cập nhật status NEAR_EXPIRY
-      if (food.status !== 'NEAR_EXPIRY') {
+      if (food.status !== 'NEAR_EXPIRY' && food.status !== 'NEED_CHECK') {
         food.status = 'NEAR_EXPIRY';
         await food.save();
       }

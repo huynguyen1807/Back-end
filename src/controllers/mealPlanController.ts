@@ -12,6 +12,15 @@ import {
   updateMealPlan
 } from '../services/mealPlanService';
 
+function isMealPlanBadRequest(message = '') {
+  return (
+    message.includes('required') ||
+    message.includes('not found') ||
+    message.includes('Not enough') ||
+    message.includes('not compatible')
+  );
+}
+
 export const listPlans = async (req: AuthRequest, res: Response) => {
   try {
     const plans = await listMealPlans(req.user!.userId, req.query);
@@ -62,7 +71,7 @@ export const createPlan = async (req: AuthRequest, res: Response) => {
     const plan = await createMealPlan(req.user!.userId, req.body);
     res.status(201).json({ success: true, data: plan });
   } catch (error: any) {
-    res.status(error.message.includes('required') || error.message.includes('not found') ? 400 : 500)
+    res.status(isMealPlanBadRequest(error.message) ? 400 : 500)
       .json({ success: false, message: error.message });
   }
 };
@@ -72,7 +81,11 @@ export const updatePlan = async (req: AuthRequest, res: Response) => {
     const plan = await updateMealPlan(req.params.id as string, req.user!.userId, req.body);
     res.json({ success: true, data: plan });
   } catch (error: any) {
-    res.status(error.message.includes('not found') ? 404 : 500).json({ success: false, message: error.message });
+    if (error.message.includes('Meal plan not found')) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    res.status(isMealPlanBadRequest(error.message) ? 400 : 500).json({ success: false, message: error.message });
   }
 };
 

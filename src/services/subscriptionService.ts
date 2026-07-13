@@ -55,7 +55,7 @@ export const ensureDefaultSubscriptionPlans = async () => {
       SubscriptionPlan.findOneAndUpdate(
         { planCode: plan.planCode },
         { ...plan, isActive: true },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
+        { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
       )
     )
   );

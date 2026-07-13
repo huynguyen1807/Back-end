@@ -64,7 +64,7 @@ export async function updateStorageLocation(locationId: string, userId: string, 
     await StorageLocation.updateMany(buildOwnerQuery(context), { isDefault: false });
   }
 
-  return StorageLocation.findByIdAndUpdate(locationId, data, { new: true });
+  return StorageLocation.findByIdAndUpdate(locationId, data, { returnDocument: 'after' });
 }
 
 // ─── DELETE storage location ──────────────────────────────────────────────────

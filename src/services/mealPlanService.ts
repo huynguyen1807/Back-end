@@ -17,6 +17,7 @@ import {
   generateAiRecipeDrafts,
   MealCalorieAllocation
 } from './aiRecipeProvider';
+import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
 
 type InventoryPriorityFood = {
   _id: any;
@@ -48,6 +49,20 @@ type RecipeAvailabilityAnalysis = {
   }>;
 };
 
+type UsedFoodInput = {
+  foodItemId?: any;
+  foodName?: string;
+  quantityUsed?: number;
+  quantity?: number;
+  unit?: string;
+  calories?: number;
+  macroSummary?: {
+    protein?: number;
+    carbs?: number;
+    fat?: number;
+  };
+};
+
 function normalizeRecipeId(value: any) {
   const raw = value?._id || value;
   if (!raw) return undefined;
@@ -57,8 +72,226 @@ function normalizeRecipeId(value: any) {
   return recipeId;
 }
 
-async function resolveMealPayload(meal: any) {
+function normalizeFoodItemId(value: any) {
+  const raw = value?._id || value;
+  if (!raw) return undefined;
+  const foodItemId = String(raw).trim();
+  if (!foodItemId || foodItemId === 'undefined' || foodItemId === 'null') return undefined;
+  return foodItemId;
+}
+
+function normalizeUnit(value?: string) {
+  const unit = String(value || '').trim().toLowerCase();
+  if (['kg', 'kilogram', 'kilograms'].includes(unit)) return 'kg';
+  if (['g', 'gram', 'grams'].includes(unit)) return 'g';
+  if (['l', 'liter', 'litre', 'liters', 'litres'].includes(unit)) return 'l';
+  if (['ml', 'milliliter', 'millilitre', 'milliliters', 'millilitres'].includes(unit)) return 'ml';
+  if (['item', 'piece', 'pieces', 'cai', 'cái', 'qua', 'quả', 'trai', 'trái'].includes(unit)) return 'item';
+  if (['serving', 'portion', 'phan', 'phần'].includes(unit)) return 'serving';
+  return unit;
+}
+
+function getUnitFamily(unit?: string) {
+  const normalized = normalizeUnit(unit);
+  if (normalized === 'kg' || normalized === 'g') return 'mass';
+  if (normalized === 'l' || normalized === 'ml') return 'volume';
+  if (normalized === 'item') return 'count';
+  if (normalized === 'serving') return 'serving';
+  return normalized || 'unknown';
+}
+
+function convertQuantity(quantity: number, fromUnit?: string, toUnit?: string) {
+  const from = normalizeUnit(fromUnit);
+  const to = normalizeUnit(toUnit);
+  const value = Number(quantity) || 0;
+  if (!from || !to || from === to) return value;
+
+  if (getUnitFamily(from) !== getUnitFamily(to)) return null;
+
+  if (from === 'kg' && to === 'g') return value * 1000;
+  if (from === 'g' && to === 'kg') return value / 1000;
+  if (from === 'l' && to === 'ml') return value * 1000;
+  if (from === 'ml' && to === 'l') return value / 1000;
+
+  return value;
+}
+
+function roundTwo(value: number) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function mealInventorySignature(meal: any) {
+  return JSON.stringify(
+    (meal.usedFoods || [])
+      .map((item: any) => ({
+        foodItemId: normalizeFoodItemId(item.foodItemId),
+        quantityUsed: roundTwo(Number(item.quantityUsed) || 0),
+        unit: normalizeUnit(item.unit),
+      }))
+      .filter((item: any) => item.foodItemId && item.quantityUsed > 0)
+      .sort((a: any, b: any) => String(a.foodItemId).localeCompare(String(b.foodItemId)))
+  );
+}
+
+function mealFingerprint(meal: any) {
+  return JSON.stringify({
+    mealType: meal?.mealType || '',
+    recipeId: normalizeRecipeId(meal?.recipeId) || '',
+    recipeName: normalize(meal?.recipeName || ''),
+    scheduledTime: meal?.scheduledTime || '',
+    inventory: mealInventorySignature(meal),
+  });
+}
+
+function addMacros(a: any = {}, b: any = {}) {
+  return {
+    protein: roundTwo((Number(a.protein) || 0) + (Number(b.protein) || 0)),
+    carbs: roundTwo((Number(a.carbs) || 0) + (Number(b.carbs) || 0)),
+    fat: roundTwo((Number(a.fat) || 0) + (Number(b.fat) || 0)),
+  };
+}
+
+async function resolveUsedFoods(meal: any, ownerQuery: any = {}): Promise<any[]> {
+  const inputs: UsedFoodInput[] = Array.isArray(meal.usedFoods) ? meal.usedFoods : [];
+  const resolved = [];
+
+  for (const input of inputs) {
+    const foodItemId = normalizeFoodItemId(input.foodItemId);
+    const quantityUsed = Number(input.quantityUsed ?? input.quantity) || 0;
+    if (!foodItemId || quantityUsed <= 0) continue;
+
+    const food = await FoodItem.findOne({ _id: foodItemId, ...ownerQuery, isDeleted: false });
+    if (!food) throw new Error(`Food item not found: ${foodItemId}`);
+
+    const unit = input.unit || food.unit;
+    const converted = convertQuantity(quantityUsed, unit, food.unit);
+    if (converted === null) {
+      throw new Error(`Unit ${unit} is not compatible with inventory unit ${food.unit} for ${food.foodName}`);
+    }
+
+    const nutrition = await resolveNutritionForFood({
+      foodName: food.foodName,
+      categoryId: getCategoryId(food.categoryId),
+      quantity: quantityUsed,
+      unit,
+    });
+
+    resolved.push({
+      foodItemId,
+      foodName: input.foodName?.trim() || food.foodName,
+      quantityUsed: roundTwo(quantityUsed),
+      unit,
+      calories: Number(input.calories) > 0 ? roundTwo(Number(input.calories)) : nutrition.calories,
+      macroSummary: hasMacroValue(input.macroSummary)
+        ? {
+            protein: roundTwo(Number(input.macroSummary?.protein) || 0),
+            carbs: roundTwo(Number(input.macroSummary?.carbs) || 0),
+            fat: roundTwo(Number(input.macroSummary?.fat) || 0),
+          }
+        : nutrition.macroSummary,
+    });
+  }
+
+  return resolved;
+}
+
+async function applyFoodUsage(usedFoods: any[] = [], direction: 'consume' | 'restore', ownerQuery: any = {}) {
+  for (const usage of usedFoods) {
+    const foodItemId = normalizeFoodItemId(usage.foodItemId);
+    const quantityUsed = Number(usage.quantityUsed) || 0;
+    if (!foodItemId || quantityUsed <= 0) continue;
+
+    const food = await FoodItem.findOne({ _id: foodItemId, ...ownerQuery, isDeleted: false });
+    if (!food) throw new Error(`Food item not found: ${foodItemId}`);
+
+    const converted = convertQuantity(quantityUsed, usage.unit, food.unit);
+    if (converted === null) {
+      throw new Error(`Unit ${usage.unit} is not compatible with inventory unit ${food.unit} for ${food.foodName}`);
+    }
+
+    if (direction === 'consume') {
+      const currentQuantity = Number(food.quantity) || 0;
+      if (converted > currentQuantity + 1e-9) {
+        throw new Error(`Not enough ${food.foodName}. Available ${currentQuantity} ${food.unit}, requested ${quantityUsed} ${usage.unit}.`);
+      }
+
+      const nextQuantity = roundTwo(Math.max(0, currentQuantity - converted));
+      food.quantity = nextQuantity;
+      food.isConsumed = nextQuantity <= 0;
+      food.consumedAt = nextQuantity <= 0 ? new Date() : undefined;
+    } else {
+      const nextQuantity = roundTwo((Number(food.quantity) || 0) + converted);
+      food.quantity = nextQuantity;
+      food.isConsumed = false;
+      food.consumedAt = undefined;
+    }
+
+    await food.save();
+  }
+}
+
+async function applyMealInventoryTransitions(oldMeals: any[] = [], newMeals: any[] = [], ownerQuery: any = {}) {
+  const nextMeals = newMeals.map((meal) => ({ ...meal }));
+  const usedOldIndexes = new Set<number>();
+  const matchedOldMeals: any[] = [];
+
+  const findMatchingOldMealIndex = (meal: any) => {
+    const fingerprint = mealFingerprint(meal);
+    return oldMeals.findIndex((oldMeal, oldIndex) => {
+      return !usedOldIndexes.has(oldIndex) && mealFingerprint(oldMeal) === fingerprint;
+    });
+  };
+
+  for (let index = 0; index < nextMeals.length; index++) {
+    const meal = nextMeals[index] as any;
+    const oldIndex = findMatchingOldMealIndex(meal);
+    const oldMeal = oldIndex >= 0 ? (oldMeals[oldIndex] as any) : null;
+
+    if (oldIndex >= 0) usedOldIndexes.add(oldIndex);
+    matchedOldMeals[index] = oldMeal;
+  }
+
+  for (let index = 0; index < nextMeals.length; index++) {
+    const meal = nextMeals[index] as any;
+    const oldMeal = matchedOldMeals[index];
+    const oldApplied = oldMeal?.status === 'COMPLETED' && oldMeal?.inventoryApplied;
+
+    if (oldApplied && meal.status !== 'COMPLETED') {
+      await applyFoodUsage(oldMeal.usedFoods || [], 'restore', ownerQuery);
+      meal.inventoryApplied = false;
+    }
+  }
+
+  for (let index = 0; index < oldMeals.length; index++) {
+    const oldMeal = oldMeals[index] as any;
+    const oldApplied = oldMeal?.status === 'COMPLETED' && oldMeal?.inventoryApplied;
+    if (!usedOldIndexes.has(index) && oldApplied) {
+      await applyFoodUsage(oldMeal.usedFoods || [], 'restore', ownerQuery);
+    }
+  }
+
+  for (let index = 0; index < nextMeals.length; index++) {
+    const meal = nextMeals[index] as any;
+    const oldMeal = matchedOldMeals[index];
+    const oldApplied = oldMeal?.status === 'COMPLETED' && oldMeal?.inventoryApplied;
+    const sameCompletedMeal = oldApplied && meal.status === 'COMPLETED';
+
+    if (meal.status === 'COMPLETED') {
+      if (!sameCompletedMeal && (meal.usedFoods || []).length) {
+        await applyFoodUsage(meal.usedFoods, 'consume', ownerQuery);
+      }
+      meal.inventoryApplied = Boolean((meal.usedFoods || []).length);
+    } else {
+      meal.inventoryApplied = false;
+    }
+  }
+
+  return nextMeals;
+}
+
+async function resolveMealPayload(meal: any, ownerQuery: any = {}) {
   const recipeId = normalizeRecipeId(meal.recipeId);
+  const usedFoods = await resolveUsedFoods(meal, ownerQuery);
   const payload: any = {
     mealType: meal.mealType,
     recipeId,
@@ -68,7 +301,13 @@ async function resolveMealPayload(meal: any) {
     calories: Number(meal.calories) || 0,
     macroSummary: meal.macroSummary || { protein: 0, carbs: 0, fat: 0 },
     status: meal.status || 'PENDING',
-    usedFoodItemIds: Array.isArray(meal.usedFoodItemIds) ? meal.usedFoodItemIds : []
+    usedFoodItemIds: usedFoods.length
+      ? usedFoods.map((item) => item.foodItemId)
+      : Array.isArray(meal.usedFoodItemIds)
+        ? meal.usedFoodItemIds.map(normalizeFoodItemId).filter(Boolean)
+        : [],
+    usedFoods,
+    inventoryApplied: Boolean(meal.inventoryApplied)
   };
 
   if (!payload.mealType) throw new Error('mealType is required');
@@ -96,17 +335,30 @@ async function resolveMealPayload(meal: any) {
     }
   }
 
+  if (usedFoods.length) {
+    const nutritionTotals = usedFoods.reduce(
+      (acc, item) => ({
+        calories: roundTwo(acc.calories + (Number(item.calories) || 0)),
+        macroSummary: addMacros(acc.macroSummary, item.macroSummary),
+      }),
+      { calories: 0, macroSummary: { protein: 0, carbs: 0, fat: 0 } }
+    );
+
+    payload.calories = nutritionTotals.calories;
+    payload.macroSummary = nutritionTotals.macroSummary;
+  }
+
   if (!payload.recipeName?.trim()) throw new Error('recipeName is required');
   payload.recipeName = payload.recipeName.trim();
 
   return payload;
 }
 
-async function buildMealPlanPayload(userId: string, data: any) {
+async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any = {}) {
   if (!data.planDate) throw new Error('planDate is required');
 
   const meals = Array.isArray(data.meals)
-    ? await Promise.all(data.meals.map((meal: any) => resolveMealPayload(meal)))
+    ? await Promise.all(data.meals.map((meal: any) => resolveMealPayload(meal, ownerQuery)))
     : [];
   const totals = calculateMealTotals(meals);
 
@@ -136,19 +388,23 @@ export async function listMealPlans(userId: string, query: any = {}) {
 
   return MealPlan.find(filter)
     .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary')
+    .populate('meals.usedFoods.foodItemId', 'foodName quantity unit status')
     .sort({ planDate: 1, updatedAt: -1 });
 }
 
 export async function getMealPlanById(planId: string, userId: string) {
   const plan = await MealPlan.findOne({ _id: planId, userId })
-    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
+    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary')
+    .populate('meals.usedFoods.foodItemId', 'foodName quantity unit status');
 
   if (!plan) throw new Error('Meal plan not found');
   return plan;
 }
 
 export async function createMealPlan(userId: string, data: any) {
-  const payload = await buildMealPlanPayload(userId, data);
+  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const payload = await buildMealPlanPayload(userId, data, ownerQuery);
+  payload.meals = await applyMealInventoryTransitions([], payload.meals, ownerQuery);
   return MealPlan.create(payload);
 }
 
@@ -156,20 +412,31 @@ export async function updateMealPlan(planId: string, userId: string, data: any) 
   const existing = await MealPlan.findOne({ _id: planId, userId });
   if (!existing) throw new Error('Meal plan not found');
 
+  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
   const payload = await buildMealPlanPayload(userId, {
     ...existing.toObject(),
     ...data,
     planDate: data.planDate || existing.planDate,
     meals: data.meals || existing.meals
-  });
+  }, ownerQuery);
+
+  payload.meals = await applyMealInventoryTransitions(existing.meals || [], payload.meals, ownerQuery);
+  const totals = calculateMealTotals(payload.meals);
+  payload.totalCalories = totals.totalCalories;
+  payload.macroSummary = totals.macroSummary;
 
   return MealPlan.findByIdAndUpdate(planId, payload, { returnDocument: 'after' })
-    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
+    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary')
+    .populate('meals.usedFoods.foodItemId', 'foodName quantity unit status');
 }
 
 export async function deleteMealPlan(planId: string, userId: string) {
-  const deleted = await MealPlan.findOneAndDelete({ _id: planId, userId });
-  if (!deleted) throw new Error('Meal plan not found');
+  const existing = await MealPlan.findOne({ _id: planId, userId });
+  if (!existing) throw new Error('Meal plan not found');
+
+  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  await applyMealInventoryTransitions(existing.meals || [], [], ownerQuery);
+  await MealPlan.deleteOne({ _id: planId, userId });
   return { message: 'Meal plan deleted successfully' };
 }
 
@@ -208,11 +475,15 @@ function hasMacroValue(macroSummary: any) {
 }
 
 function getCategoryId(value: any) {
-  return value?._id || value;
+  const raw = value?._id || value;
+  if (!raw) return undefined;
+  const categoryId = String(raw).trim();
+  if (!categoryId || categoryId === 'undefined' || categoryId === 'null') return undefined;
+  return categoryId;
 }
 
 function getCategoryName(value: any) {
-  return typeof value === 'object' ? value?.categoryName : undefined;
+  return value && typeof value === 'object' ? value.categoryName : undefined;
 }
 
 function isBlockedByPreference(foodName: string, preference: any) {

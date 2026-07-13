@@ -2,6 +2,7 @@ import { FoodCategory } from '../models/foodCategory.model';
 import { MealPlan } from '../models/mealPlan.model';
 import { NutritionFact } from '../models/nutritionFact.model';
 import { NutritionReport } from '../models/nutritionReport.model';
+import { normalizeFoodText } from '../utils/foodCategoryValidation';
 
 type MacroSummary = {
   protein: number;
@@ -228,11 +229,20 @@ export async function resolveCategory(categoryId?: string, categoryName?: string
   const name = categoryName?.trim();
   if (!name) throw new Error('categoryId or categoryName is required');
 
-  const category = await FoodCategory.findOneAndUpdate(
-    { categoryName: new RegExp(`^${escapeRegex(name)}$`, 'i') },
-    { $setOnInsert: { categoryName: name, isActive: true, createdBy } },
-    { new: true, upsert: true }
-  );
+  const normalizedName = normalizeFoodText(name);
+  const existingCategories = await FoodCategory.find({}).select('categoryName displayName').lean();
+  const existing = existingCategories.find((category: any) => {
+    return normalizeFoodText(category.categoryName) === normalizedName || normalizeFoodText(category.displayName) === normalizedName;
+  });
+
+  if (existing?._id) return existing._id;
+
+  const category = await FoodCategory.create({
+    categoryName: name,
+    displayName: name,
+    isActive: true,
+    createdBy
+  });
 
   return category._id;
 }
@@ -321,6 +331,6 @@ export async function generateNutritionReport(userId: string, data: any = {}) {
   return NutritionReport.findOneAndUpdate(
     { userId, periodType, startDate },
     reportData,
-    { new: true, upsert: true }
+    { returnDocument: 'after', upsert: true }
   );
 }

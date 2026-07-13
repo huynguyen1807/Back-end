@@ -11,6 +11,7 @@ import {
   updateRecipe
 } from './recipeService';
 import { listNutritionFacts, resolveCategory } from './nutritionService';
+import { normalizeFoodText } from '../utils/foodCategoryValidation';
 
 async function logAdminAction(
   adminId: string,
@@ -28,6 +29,35 @@ async function logAdminAction(
     oldValue,
     newValue
   });
+}
+
+function normalizeStringList(value: any) {
+  if (value === undefined) return undefined;
+  const rawList = Array.isArray(value) ? value : String(value).split(',');
+  const seen = new Set<string>();
+
+  return rawList
+    .map((item: any) => String(item).trim())
+    .filter(Boolean)
+    .filter((item: string) => {
+      const key = normalizeFoodText(item);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+async function assertUniqueCategoryName(categoryName: string, ignoreCategoryId?: string) {
+  const normalized = normalizeFoodText(categoryName);
+  const categories = await FoodCategory.find({}).select('categoryName displayName').lean();
+  const duplicate = categories.find((category: any) => {
+    if (ignoreCategoryId && String(category._id) === String(ignoreCategoryId)) return false;
+    return normalizeFoodText(category.categoryName) === normalized || normalizeFoodText(category.displayName) === normalized;
+  });
+
+  if (duplicate) {
+    throw new Error(`Food category "${categoryName}" duplicates existing category "${duplicate.displayName || duplicate.categoryName}"`);
+  }
 }
 
 export async function listAdminNutritionFacts(query: any = {}) {
@@ -81,7 +111,7 @@ export async function updateAdminNutritionFact(adminId: string, factId: string, 
   if (updateData.fat !== undefined) updateData.fat = Number(updateData.fat) || 0;
   if (updateData.status === 'OFFICIAL') updateData.reviewedBy = adminId;
 
-  const updated = await NutritionFact.findByIdAndUpdate(factId, updateData, { new: true })
+  const updated = await NutritionFact.findByIdAndUpdate(factId, updateData, { returnDocument: 'after' })
     .populate('categoryId', 'categoryName');
 
   await logAdminAction(adminId, 'UPDATE_NUTRITION_FACT', 'nutrition_facts', factId, existing, updated);
@@ -130,15 +160,22 @@ export async function listAdminFoodCategories(query: any = {}) {
   if (query.isActive !== undefined) filter.isActive = query.isActive === 'true' || query.isActive === true;
   if (query.q) filter.categoryName = new RegExp(String(query.q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
-  return FoodCategory.find(filter).sort({ categoryName: 1 });
+  return FoodCategory.find(filter).sort({ sortOrder: 1, categoryName: 1 });
 }
 
 export async function createAdminFoodCategory(adminId: string, data: any) {
   if (!data.categoryName?.trim()) throw new Error('categoryName is required');
+  await assertUniqueCategoryName(data.categoryName.trim());
+  if (data.displayName?.trim()) await assertUniqueCategoryName(data.displayName.trim());
 
   const created = await FoodCategory.create({
     categoryName: data.categoryName.trim(),
+    displayName: data.displayName?.trim(),
     description: data.description,
+    aliases: normalizeStringList(data.aliases) ?? [],
+    keywords: normalizeStringList(data.keywords) ?? [],
+    foodExamples: normalizeStringList(data.foodExamples) ?? [],
+    sortOrder: Number(data.sortOrder) || 0,
     isActive: data.isActive ?? true,
     createdBy: adminId
   });
@@ -152,11 +189,22 @@ export async function updateAdminFoodCategory(adminId: string, categoryId: strin
   if (!existing) throw new Error('Food category not found');
 
   const updateData: any = {};
-  if (data.categoryName !== undefined) updateData.categoryName = data.categoryName.trim();
+  if (data.categoryName !== undefined) {
+    await assertUniqueCategoryName(data.categoryName.trim(), categoryId);
+    updateData.categoryName = data.categoryName.trim();
+  }
+  if (data.displayName !== undefined) {
+    if (data.displayName?.trim()) await assertUniqueCategoryName(data.displayName.trim(), categoryId);
+    updateData.displayName = data.displayName?.trim();
+  }
   if (data.description !== undefined) updateData.description = data.description;
+  if (data.aliases !== undefined) updateData.aliases = normalizeStringList(data.aliases);
+  if (data.keywords !== undefined) updateData.keywords = normalizeStringList(data.keywords);
+  if (data.foodExamples !== undefined) updateData.foodExamples = normalizeStringList(data.foodExamples);
+  if (data.sortOrder !== undefined) updateData.sortOrder = Number(data.sortOrder) || 0;
   if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
-  const updated = await FoodCategory.findByIdAndUpdate(categoryId, updateData, { new: true });
+  const updated = await FoodCategory.findByIdAndUpdate(categoryId, updateData, { returnDocument: 'after' });
   await logAdminAction(adminId, 'UPDATE_FOOD_CATEGORY', 'food_categories', categoryId, existing, updated);
   return updated;
 }
@@ -165,7 +213,7 @@ export async function deleteAdminFoodCategory(adminId: string, categoryId: strin
   const existing = await FoodCategory.findById(categoryId);
   if (!existing) throw new Error('Food category not found');
 
-  const updated = await FoodCategory.findByIdAndUpdate(categoryId, { isActive: false }, { new: true });
+  const updated = await FoodCategory.findByIdAndUpdate(categoryId, { isActive: false }, { returnDocument: 'after' });
   await logAdminAction(adminId, 'DELETE_FOOD_CATEGORY', 'food_categories', categoryId, existing, updated);
   return { message: 'Food category deactivated successfully' };
 }
@@ -200,7 +248,7 @@ export async function createAdminStorageRule(adminId: string, data: any) {
       createdBy: adminId,
       reviewedBy: data.status === 'OFFICIAL' ? adminId : undefined
     },
-    { new: true, upsert: true }
+    { returnDocument: 'after', upsert: true }
   ).populate('categoryId', 'categoryName');
 
   await logAdminAction(adminId, 'UPSERT_STORAGE_RULE', 'storage_rules', created._id, null, created);
@@ -223,7 +271,7 @@ export async function updateAdminStorageRule(adminId: string, ruleId: string, da
   if (updateData.priority !== undefined) updateData.priority = Number(updateData.priority) || 0;
   if (updateData.status === 'OFFICIAL') updateData.reviewedBy = adminId;
 
-  const updated = await StorageRule.findByIdAndUpdate(ruleId, updateData, { new: true })
+  const updated = await StorageRule.findByIdAndUpdate(ruleId, updateData, { returnDocument: 'after' })
     .populate('categoryId', 'categoryName');
   await logAdminAction(adminId, 'UPDATE_STORAGE_RULE', 'storage_rules', ruleId, existing, updated);
   return updated;

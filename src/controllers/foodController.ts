@@ -15,7 +15,7 @@ import {
 export const listFoods = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const { filter } = req.query; // SAFE | NEAR_EXPIRY | EXPIRED
+    const { filter } = req.query; // SAFE | NEAR_EXPIRY | EXPIRED | NEED_CHECK
     const items = await getFoodItems(userId, filter as string);
     res.json({ success: true, data: items });
   } catch (error: any) {

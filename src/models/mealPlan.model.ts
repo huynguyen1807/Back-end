@@ -2,6 +2,22 @@ import { Schema } from 'mongoose';
 
 import { existingModel, objectId, timestamps } from './modelHelpers';
 
+const usedFoodSchema = new Schema(
+  {
+    foodItemId: { type: objectId, ref: 'FoodItem', required: true },
+    foodName: { type: String, required: true },
+    quantityUsed: { type: Number, required: true, min: 0 },
+    unit: { type: String, required: true },
+    calories: { type: Number, default: 0, min: 0 },
+    macroSummary: {
+      protein: { type: Number, default: 0, min: 0 },
+      carbs: { type: Number, default: 0, min: 0 },
+      fat: { type: Number, default: 0, min: 0 }
+    }
+  },
+  { _id: false }
+);
+
 const mealSchema = new Schema(
   {
     mealType: {
@@ -20,7 +36,9 @@ const mealSchema = new Schema(
       fat: { type: Number, default: 0, min: 0 }
     },
     status: { type: String, enum: ['COMPLETED', 'PREPARING', 'PENDING'], default: 'PENDING' },
-    usedFoodItemIds: [{ type: objectId, ref: 'FoodItem' }]
+    usedFoodItemIds: [{ type: objectId, ref: 'FoodItem' }],
+    usedFoods: [usedFoodSchema],
+    inventoryApplied: { type: Boolean, default: false }
   },
   { _id: false }
 );
