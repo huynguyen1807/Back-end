@@ -337,8 +337,8 @@ function defaultExpiryDays(storageType: string) {
 async function resolveStorage(userId: string, categoryId?: string, preferredStorageType?: string) {
   const rule = categoryId
     ? await StorageRule.findOne({ categoryId, status: 'OFFICIAL' })
-        .sort({ priority: -1, estimatedDays: -1 })
-        .lean()
+      .sort({ priority: -1, estimatedDays: -1 })
+      .lean()
     : null;
 
   const storageType = normalizeStorageType(rule?.storageType || preferredStorageType);
