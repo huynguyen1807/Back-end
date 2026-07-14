@@ -46,8 +46,9 @@ function getGeminiModelNames() {
 
   return Array.from(new Set([
     ...configured,
-    'gemini-2.0-flash-lite',
-    'gemini-2.0-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash',
+    'gemini-2.5-flash',
   ]));
 }
 
