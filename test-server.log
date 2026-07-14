@@ -1,0 +1,17 @@
+﻿node.exe : npm warn Unknown env config "devdir". This will stop working in the next major version of npm.
+At line:1 char:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (npm warn Unknow...version of npm.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+> dev
+> tsx watch src/server.ts
+
+MongoDB Atlas connected: ac-kx9ms7d-shard-00-00.drifhmi.mongodb.net/freshfriends
+[NotificationJob] Khß╗ƒi ─æß╗Öng ΓÇö chß║íy mß╗ùi 6 tiß║┐ng.
+Backend server running on port 4000 (0.0.0.0)
+[NotificationJob] Bß║»t ─æß║ºu kiß╗âm tra thß╗▒c phß║⌐m cho tß║Ñt cß║ú users...
+[NotificationJob] T├¼m thß║Ñy 12 user ─æang hoß║ít ─æß╗Öng.
+[NotificationJob] Ho├án th├ánh. ─É├ú xß╗¡ l├╜ 12/12 users.

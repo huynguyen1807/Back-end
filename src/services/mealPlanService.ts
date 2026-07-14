@@ -17,6 +17,10 @@ import {
   generateAiRecipeDrafts,
   MealCalorieAllocation
 } from './aiRecipeProvider';
+import {
+  extractRecipeFromVideoUrl,
+  UnsupportedVideoPlatformError
+} from './videoRecipeExtractor';
 import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
 
 type InventoryPriorityFood = {
@@ -1588,50 +1592,118 @@ export async function extractRecipeFromVideo(userId: string, data: any = {}) {
   if (!videoUrl) throw new Error('videoUrl is required');
 
   const platform = detectVideoPlatform(videoUrl);
-  const urlParts = videoUrl
-    .replace(/^https?:\/\//, '')
-    .split(/[/?#=&_-]+/)
-    .filter(Boolean);
-  const readableTokens = urlParts
-    .slice(-6)
-    .map((part) => part.replace(/\d+/g, '').trim())
-    .filter((part) => part.length > 2);
+  if (platform !== 'YOUTUBE') {
+    throw new UnsupportedVideoPlatformError(platform);
+  }
 
-  const recipeName = data.recipeName || readableTokens.join(' ') || 'Công thức trích xuất từ video';
-  const extractedIngredients = Array.isArray(data.ingredients) && data.ingredients.length
-    ? data.ingredients
-    : [
-        { ingredientName: 'Nguyên liệu chính', quantity: 1, unit: 'serving' },
-        { ingredientName: 'Gia vị', quantity: 1, unit: 'serving' }
-      ];
-
-  const source = await VideoRecipeSource.create({
+  const processingSource = await VideoRecipeSource.create({
     userId,
     videoUrl,
     platform,
-    extractedText: data.extractedText || `Bản nháp công thức được trích xuất từ video ${platform}.`,
-    extractedIngredients,
+    extractedText: '',
+    extractedIngredients: [],
     missingIngredients: [],
-    status: 'SUCCESS'
+    status: 'PROCESSING'
   });
 
-  const generatedRecipe = {
-    recipeName,
-    description: `Bản nháp công thức được trích xuất từ video ${platform}.`,
-    ingredients: extractedIngredients,
+  let extraction;
+  try {
+    extraction = await extractRecipeFromVideoUrl(videoUrl);
+  } catch (error: any) {
+    processingSource.status = 'FAILED';
+    processingSource.extractedText = error?.message || 'extraction failed';
+    await processingSource.save();
+    throw error;
+  }
+
+  const { extractedRecipe } = extraction;
+
+  const ingredientsForRecipe = extractedRecipe.ingredients.map((item) => ({
+    ingredientName: item.ingredientName,
+    quantity: item.quantity,
+    unit: item.unit,
+    isRequired: item.isRequired !== false
+  }));
+
+  const cookingSteps = extractedRecipe.cookingSteps.length
+    ? extractedRecipe.cookingSteps
+    : extractedRecipe.description
+      ? [extractedRecipe.description]
+      : ['Chưa có hướng dẫn chi tiết từ video.'];
+
+  const tags = Array.from(
+    new Set([
+      'VIDEO_EXTRACTED',
+      platform,
+      ...(extractedRecipe.tags || []),
+      extractedRecipe.cuisine ? `Ẩm thực ${extractedRecipe.cuisine}` : ''
+    ].filter(Boolean))
+  );
+
+  const recipe = await Recipe.create({
+    recipeName: extractedRecipe.recipeName,
+    description: extractedRecipe.description,
+    cookingSteps,
+    cookingTime: extractedRecipe.cookingTime,
+    difficulty: extractedRecipe.difficulty || 'EASY',
+    calories: extractedRecipe.calories,
+    macroSummary: extractedRecipe.macroSummary
+      ? {
+          protein: extractedRecipe.macroSummary.protein || 0,
+          carbs: extractedRecipe.macroSummary.carbs || 0,
+          fat: extractedRecipe.macroSummary.fat || 0
+        }
+      : undefined,
+    tags,
+    ingredients: ingredientsForRecipe,
     sourceType: 'VIDEO_EXTRACTED',
-    videoSourceId: source._id,
-    tags: ['VIDEO_EXTRACTED']
-  };
+    videoSourceId: processingSource._id,
+    createdBy: userId,
+    isActive: true
+  });
+
+  processingSource.recipeId = recipe._id;
+  processingSource.status = 'SUCCESS';
+  processingSource.extractedText =
+    extractedRecipe.description ||
+    extractedRecipe.notes ||
+    `Trích xuất bởi ${extraction.modelUsed}`;
+  processingSource.extractedIngredients = ingredientsForRecipe;
+  processingSource.missingIngredients = [];
+  await processingSource.save();
 
   await AIGeneratedData.create({
     dataType: 'RECIPE',
-    generatedContent: generatedRecipe,
+    generatedContent: {
+      recipeId: recipe._id,
+      recipeName: recipe.recipeName,
+      sourceType: 'VIDEO_EXTRACTED',
+      videoSourceId: processingSource._id,
+      modelUsed: extraction.modelUsed,
+      servings: extractedRecipe.servings,
+      cuisine: extractedRecipe.cuisine
+    },
     status: 'PENDING_REVIEW'
   });
 
   return {
-    source,
-    extractedRecipe: generatedRecipe
+    source: processingSource,
+    recipe,
+    extractedRecipe: {
+      recipeId: recipe._id,
+      recipeName: recipe.recipeName,
+      description: recipe.description,
+      ingredients: ingredientsForRecipe,
+      cookingSteps,
+      cookingTime: recipe.cookingTime,
+      difficulty: recipe.difficulty,
+      calories: recipe.calories,
+      servings: extractedRecipe.servings,
+      cuisine: extractedRecipe.cuisine,
+      macroSummary: recipe.macroSummary,
+      tags,
+      notes: extractedRecipe.notes,
+      sourceType: 'VIDEO_EXTRACTED'
+    }
   };
 }

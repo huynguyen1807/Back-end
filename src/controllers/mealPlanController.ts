@@ -53,7 +53,13 @@ export const extractVideoRecipe = async (req: AuthRequest, res: Response) => {
     const result = await extractRecipeFromVideo(req.user!.userId, req.body);
     res.status(201).json({ success: true, data: result });
   } catch (error: any) {
-    res.status(error.message.includes('required') ? 400 : 500).json({ success: false, message: error.message });
+    const message = error?.message || 'unknown error';
+    const status = error?.name === 'UnsupportedVideoPlatformError'
+      || message.includes('required')
+      || message.includes('not supported')
+      ? 400
+      : 500;
+    res.status(status).json({ success: false, message });
   }
 };
 
