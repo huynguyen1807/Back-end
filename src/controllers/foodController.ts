@@ -15,19 +15,19 @@ import {
 export const listFoods = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const { filter } = req.query; // SAFE | NEAR_EXPIRY | EXPIRED | NEED_CHECK
-    const items = await getFoodItems(userId, filter as string);
+    const { filter, ownerType, householdId } = req.query; // SAFE | NEAR_EXPIRY | EXPIRED | NEED_CHECK
+    const items = await getFoodItems(userId, filter as string, ownerType as string, householdId as string);
     res.json({ success: true, data: items });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// GET /api/foods/summary
 export const foodSummary = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const summary = await getFoodSummary(userId);
+    const { ownerType, householdId } = req.query;
+    const summary = await getFoodSummary(userId, ownerType as string, householdId as string);
     res.json({ success: true, data: summary });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
@@ -44,11 +44,11 @@ export const listCategories = async (_req: AuthRequest, res: Response) => {
   }
 };
 
-// GET /api/foods/:id
 export const getFood = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const item = await getFoodItemById(req.params.id as string, userId);
+    const { ownerType, householdId } = req.query;
+    const item = await getFoodItemById(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, data: item });
   } catch (error: any) {
     const status = error.message === 'Food item not found' ? 404 : 500;
@@ -56,11 +56,11 @@ export const getFood = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// POST /api/foods
 export const createFood = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const item = await createFoodItem(userId, req.body);
+    const { ownerType, householdId } = req.query;
+    const item = await createFoodItem(userId, req.body, ownerType as string, householdId as string);
     res.status(201).json({ success: true, data: item });
   } catch (error: any) {
     const status = error.message === 'Missing required fields' ? 400 : 500;
@@ -68,11 +68,11 @@ export const createFood = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// PUT /api/foods/:id
 export const updateFood = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const item = await updateFoodItem(req.params.id as string, userId, req.body);
+    const { ownerType, householdId } = req.query;
+    const item = await updateFoodItem(req.params.id as string, userId, req.body, ownerType as string, householdId as string);
     res.json({ success: true, data: item });
   } catch (error: any) {
     const status = error.message === 'Food item not found' ? 404 : 500;
@@ -80,11 +80,11 @@ export const updateFood = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// DELETE /api/foods/:id
 export const deleteFood = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const result = await deleteFoodItem(req.params.id as string, userId);
+    const { ownerType, householdId } = req.query;
+    const result = await deleteFoodItem(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, ...result });
   } catch (error: any) {
     const status = error.message === 'Food item not found' ? 404 : 500;
@@ -92,11 +92,11 @@ export const deleteFood = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// PATCH /api/foods/:id/consume
 export const consumeFood = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const result = await markFoodConsumed(req.params.id as string, userId);
+    const { ownerType, householdId } = req.query;
+    const result = await markFoodConsumed(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, ...result });
   } catch (error: any) {
     const status = error.message.includes('not found') ? 404 : 500;

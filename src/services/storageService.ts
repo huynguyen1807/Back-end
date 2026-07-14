@@ -3,7 +3,17 @@ import { StorageRule } from '../models/storageRule.model';
 import { FoodItem } from '../models/foodItem.model';
 import { HouseholdMember } from '../models/householdMember.model';
 
-async function getStorageOwnerContext(userId: string) {
+export async function getStorageOwnerContext(userId: string, requestedOwnerType?: string, requestedHouseholdId?: string) {
+  if (requestedOwnerType === 'HOUSEHOLD' && requestedHouseholdId) {
+    const membership = await HouseholdMember.findOne({ userId, householdId: requestedHouseholdId, status: 'ACTIVE' });
+    if (membership) {
+      return { ownerType: 'HOUSEHOLD', householdId: requestedHouseholdId, userId };
+    }
+    throw new Error('You are not a member of this household');
+  } else if (requestedOwnerType === 'USER') {
+    return { ownerType: 'USER', userId };
+  }
+
   const membership = await HouseholdMember.findOne({ userId, status: 'ACTIVE' }).sort({ joinedAt: 1 });
 
   if (membership) {
@@ -27,15 +37,15 @@ function buildOwnerQuery(context: any) {
 }
 
 // ─── GET storage locations của user ──────────────────────────────────────────
-export async function getStorageLocations(userId: string) {
-  const context = await getStorageOwnerContext(userId);
+export async function getStorageLocations(userId: string, ownerType?: string, householdId?: string) {
+  const context = await getStorageOwnerContext(userId, ownerType, householdId);
   return StorageLocation.find({ ...buildOwnerQuery(context), isActive: true }).sort({ isDefault: -1, storageName: 1 });
 }
 
 // ─── CREATE storage location ──────────────────────────────────────────────────
-export async function createStorageLocation(userId: string, data: any) {
+export async function createStorageLocation(userId: string, data: any, ownerType?: string, householdId?: string) {
   const { storageName, storageType, description, isDefault } = data;
-  const context = await getStorageOwnerContext(userId);
+  const context = await getStorageOwnerContext(userId, ownerType, householdId);
 
   if (!storageName || !storageType) throw new Error('storageName and storageType are required');
 
@@ -55,8 +65,8 @@ export async function createStorageLocation(userId: string, data: any) {
 }
 
 // ─── UPDATE storage location ──────────────────────────────────────────────────
-export async function updateStorageLocation(locationId: string, userId: string, data: any) {
-  const context = await getStorageOwnerContext(userId);
+export async function updateStorageLocation(locationId: string, userId: string, data: any, ownerType?: string, householdId?: string) {
+  const context = await getStorageOwnerContext(userId, ownerType, householdId);
   const loc = await StorageLocation.findOne({ _id: locationId, ...buildOwnerQuery(context), isActive: true });
   if (!loc) throw new Error('Storage location not found');
 
@@ -68,8 +78,8 @@ export async function updateStorageLocation(locationId: string, userId: string, 
 }
 
 // ─── DELETE storage location ──────────────────────────────────────────────────
-export async function deleteStorageLocation(locationId: string, userId: string) {
-  const context = await getStorageOwnerContext(userId);
+export async function deleteStorageLocation(locationId: string, userId: string, ownerType?: string, householdId?: string) {
+  const context = await getStorageOwnerContext(userId, ownerType, householdId);
   const loc = await StorageLocation.findOne({ _id: locationId, ...buildOwnerQuery(context), isActive: true });
   if (!loc) throw new Error('Storage location not found');
 
@@ -90,8 +100,8 @@ export async function deleteStorageLocation(locationId: string, userId: string) 
 
 // ─── STORAGE SUGGESTION ───────────────────────────────────────────────────────
 // Gợi ý vị trí lưu trữ tốt nhất cho 1 food item dựa vào categoryId
-export async function getStorageSuggestion(userId: string, categoryId: string) {
-  const context = await getStorageOwnerContext(userId);
+export async function getStorageSuggestion(userId: string, categoryId: string, ownerType?: string, householdId?: string) {
+  const context = await getStorageOwnerContext(userId, ownerType, householdId);
   // Lấy tất cả storage rules của category này, ưu tiên rule có priority cao nhất
   const rules = await StorageRule.find({ categoryId, status: 'OFFICIAL' })
     .populate('categoryId', 'categoryName')
