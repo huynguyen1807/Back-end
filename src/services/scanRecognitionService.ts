@@ -63,6 +63,8 @@ type GeminiFailure = {
 };
 
 const CATEGORY_SELECT = 'categoryName displayName aliases keywords foodExamples sortOrder';
+const DEFAULT_SCAN_MODEL_ATTEMPTS = 2;
+const modelCooldownUntil = new Map<string, number>();
 
 function getGenAI() {
   const apiKey = process.env.GEMINI_API_KEY || '';
@@ -78,12 +80,31 @@ function getGeminiModelNames() {
 
   return Array.from(new Set([
     ...configured,
-    'gemini-2.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash',
     'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-2.0-flash-lite',
   ]));
+}
+
+function getMaxModelAttempts() {
+  const configured = Number(process.env.GEMINI_SCAN_MAX_MODEL_ATTEMPTS);
+  if (Number.isFinite(configured) && configured > 0) return Math.min(configured, 5);
+  return DEFAULT_SCAN_MODEL_ATTEMPTS;
+}
+
+function compactList(values: unknown, limit = 6) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set<string>();
+  return values
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .filter((value) => {
+      const key = normalizeFoodText(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
 }
 
 function clamp01(value: any) {
@@ -121,9 +142,9 @@ function buildPrompt(categories: FoodCategoryLike[]) {
     id: getCategoryId(category),
     categoryName: category.categoryName,
     displayName: category.displayName,
-    aliases: category.aliases || [],
-    keywords: category.keywords || [],
-    foodExamples: category.foodExamples || [],
+    aliases: compactList(category.aliases, 4),
+    keywords: compactList(category.keywords, 6),
+    foodExamples: compactList(category.foodExamples, 8),
   }));
 
   return `
@@ -190,9 +211,24 @@ async function recognizeWithGemini(input: RecognitionInput, categories: FoodCate
   };
   const modelAttempts: string[] = [];
   let lastFailure: GeminiFailure | undefined;
+  let attemptedCount = 0;
+  const maxAttempts = getMaxModelAttempts();
 
   for (const modelName of getGeminiModelNames()) {
+    if (attemptedCount >= maxAttempts) break;
+    const cooldownUntil = modelCooldownUntil.get(modelName) || 0;
+    if (Date.now() < cooldownUntil) {
+      lastFailure = {
+        code: 'GEMINI_QUOTA_EXCEEDED',
+        message: `Gemini model ${modelName} dang trong thoi gian cooldown do quota/rate-limit.`,
+        retryAfterSeconds: Math.ceil((cooldownUntil - Date.now()) / 1000),
+        modelAttempts: [...modelAttempts],
+      };
+      continue;
+    }
+
     modelAttempts.push(modelName);
+    attemptedCount += 1;
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent([prompt, imagePart]);
@@ -209,6 +245,10 @@ async function recognizeWithGemini(input: RecognitionInput, categories: FoodCate
       console.warn(`[Gemini scan recognition error:${modelName}] ${status} ${message}`);
       const retryMatch = message.match(/retry in\s+(\d+(?:\.\d+)?)s/i) || message.match(/"retryDelay":"(\d+)s"/i);
       const retryAfterSeconds = retryMatch ? Math.ceil(Number(retryMatch[1])) : undefined;
+      if (error?.status === 429) {
+        const cooldownMs = Math.max(15, retryAfterSeconds || 60) * 1000;
+        modelCooldownUntil.set(modelName, Date.now() + cooldownMs);
+      }
       const code: GeminiFailureCode = error?.status === 429
         ? 'GEMINI_QUOTA_EXCEEDED'
         : error?.status === 404
