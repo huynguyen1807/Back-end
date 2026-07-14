@@ -22,7 +22,7 @@ function getGeminiModelName() {
   return (
     process.env.GEMINI_MODEL ||
     process.env.GEMINI_MODELS?.split(',')[0] ||
-    'gemini-2.0-flash-lite'
+    'gemini-3.1-flash-lite'
   ).trim();
 }
 
