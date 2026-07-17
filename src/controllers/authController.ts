@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { registerUser, loginUser, getUserProfile, verifyEmailOTP, resendEmailOTP, googleLoginService } from '../services/authService';
+import { registerUser, loginUser, getUserProfile, verifyEmailOTP, resendEmailOTP, googleLoginService, forgotPasswordService, resetPasswordService } from '../services/authService';
 import { AuthRequest } from '../middleware/authMiddleware';
 
 export const register = async (req: Request, res: Response) => {
@@ -65,21 +65,31 @@ export const login = async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      res.status(400).json({ message: 'Please provide email and password' });
+    if (!email) {
+      res.status(400).json({ message: 'Vui lòng nhập email' });
+      return;
+    }
+    if (!password) {
+      res.status(400).json({ message: 'Vui lòng nhập mật khẩu' });
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      res.status(400).json({ message: 'Email không hợp lệ' });
       return;
     }
 
     const result = await loginUser({ email, password });
     res.json({
-      message: 'Login successful',
+      message: 'Đăng nhập thành công',
       ...result
     });
   } catch (error: any) {
-    if (error.message === 'Invalid credentials' || error.message.includes('account is')) {
+    if (error.message === 'Email không tồn tại trong hệ thống' || error.message === 'Mật khẩu không chính xác' || error.message.includes('account is')) {
       res.status(401).json({ message: error.message });
     } else {
-      res.status(500).json({ message: 'Server error', error: error.message });
+      res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
     }
   }
 };
@@ -125,5 +135,33 @@ export const getMe = async (req: AuthRequest, res: Response) => {
     res.json(result);
   } catch (error: any) {
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+export const forgotPassword = async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      res.status(400).json({ message: 'Vui lòng cung cấp email' });
+      return;
+    }
+    const result = await forgotPasswordService(email);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+export const resetPassword = async (req: Request, res: Response) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) {
+      res.status(400).json({ message: 'Vui lòng cung cấp email, OTP và mật khẩu mới' });
+      return;
+    }
+    const result = await resetPasswordService(email, otp, newPassword);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
   }
 };

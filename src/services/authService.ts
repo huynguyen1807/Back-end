@@ -94,13 +94,13 @@ export const loginUser = async (credentials: any) => {
   // Check if user exists
   const user = await User.findOne({ email });
   if (!user) {
-    throw new Error('Invalid credentials');
+    throw new Error('Email không tồn tại trong hệ thống');
   }
 
   // Check password
   const isMatch = await bcrypt.compare(password, user.passwordHash);
   if (!isMatch) {
-    throw new Error('Invalid credentials');
+    throw new Error('Mật khẩu không chính xác');
   }
 
   if (user.status !== 'ACTIVE') {
@@ -168,4 +168,43 @@ export const getUserProfile = async (userId: string) => {
     user,
     preferences
   };
+};
+
+export const forgotPasswordService = async (email: string) => {
+  const normalizedEmail = normalizeEmail(email);
+  const user = await User.findOne({ email: normalizedEmail });
+  if (!user) throw new Error('Email không tồn tại trong hệ thống');
+
+  await OTP.deleteMany({ email: normalizedEmail });
+
+  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+  await OTP.create({ email: normalizedEmail, otp: otpCode });
+
+  try {
+    await sendOTP(normalizedEmail, otpCode);
+  } catch (error) {
+    console.error('Lỗi gửi email quên mật khẩu:', error);
+  }
+
+  return { message: 'Mã xác nhận đã được gửi đến email của bạn' };
+};
+
+export const resetPasswordService = async (email: string, otpCode: string, newPassword: string) => {
+  const normalizedEmail = normalizeEmail(email);
+  const otpRecord = await OTP.findOne({ email: normalizedEmail, otp: otpCode });
+  if (!otpRecord) {
+    throw new Error('Mã OTP không hợp lệ hoặc đã hết hạn');
+  }
+
+  const user = await User.findOne({ email: normalizedEmail });
+  if (!user) throw new Error('User not found');
+
+  const salt = await bcrypt.genSalt(10);
+  const passwordHash = await bcrypt.hash(newPassword, salt);
+  
+  user.passwordHash = passwordHash;
+  await user.save();
+
+  await OTP.deleteMany({ email: normalizedEmail });
+  return { message: 'Đặt lại mật khẩu thành công' };
 };
