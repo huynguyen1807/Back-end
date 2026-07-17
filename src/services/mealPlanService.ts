@@ -22,6 +22,7 @@ import {
   UnsupportedVideoPlatformError
 } from './videoRecipeExtractor';
 import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
+import { normalizeFoodText } from '../utils/foodCategoryValidation';
 
 type InventoryPriorityFood = {
   _id: any;
@@ -85,13 +86,15 @@ function normalizeFoodItemId(value: any) {
 }
 
 function normalizeUnit(value?: string) {
-  const unit = String(value || '').trim().toLowerCase();
+  const rawUnit = String(value || '').trim();
+  const unit = rawUnit.toLowerCase();
+  const normalizedText = normalizeFoodText(rawUnit);
   if (['kg', 'kilogram', 'kilograms'].includes(unit)) return 'kg';
   if (['g', 'gram', 'grams'].includes(unit)) return 'g';
   if (['l', 'liter', 'litre', 'liters', 'litres'].includes(unit)) return 'l';
   if (['ml', 'milliliter', 'millilitre', 'milliliters', 'millilitres'].includes(unit)) return 'ml';
-  if (['item', 'piece', 'pieces', 'cai', 'cái', 'qua', 'quả', 'trai', 'trái'].includes(unit)) return 'item';
-  if (['serving', 'portion', 'phan', 'phần'].includes(unit)) return 'serving';
+  if (['item', 'piece', 'pieces', 'cai', 'qua', 'trai'].includes(normalizedText)) return 'item';
+  if (['serving', 'portion', 'phan'].includes(normalizedText)) return 'serving';
   return unit;
 }
 
@@ -593,6 +596,152 @@ function roundQuantity(value: number) {
   return Math.round(quantity * 10) / 10;
 }
 
+function randomInt(min: number, max: number) {
+  const lower = Math.ceil(min);
+  const upper = Math.floor(max);
+  if (upper <= lower) return lower;
+  return lower + Math.floor(Math.random() * (upper - lower + 1));
+}
+
+const BASIC_PANTRY_INGREDIENTS = new Set([
+  'muoi',
+  'duong',
+  'tieu',
+  'hat nem',
+  'bot ngot',
+  'mi chinh',
+  'dau an',
+  'dau olive',
+  'nuoc mam',
+  'nuoc tuong',
+  'xi dau',
+  'gia vi',
+  'hanh ngo',
+  'hanh la',
+  'rau thom',
+  'toi',
+  'ot',
+  'chanh'
+]);
+
+function isBasicPantryIngredient(name?: string) {
+  const normalized = normalizeFoodText(name || '');
+  if (!normalized) return false;
+  if (BASIC_PANTRY_INGREDIENTS.has(normalized)) return true;
+  return /^(muoi|duong|tieu|hat nem|bot ngot|mi chinh|dau an|dau olive|nuoc mam|nuoc tuong|xi dau|gia vi|hanh ngo|hanh la|rau thom|toi|ot|chanh)(\s|$)/.test(normalized);
+}
+
+function inferRecipeUnit(ingredientName: string, unit?: string, matchedFood?: InventoryPriorityFood) {
+  const normalizedUnit = normalizeUnit(unit);
+  const normalizedName = normalizeFoodText(ingredientName);
+  const foodUnit = matchedFood?.unit;
+
+  if (foodUnit) {
+    const normalizedFoodUnit = normalizeUnit(foodUnit);
+    if (['kg', 'g', 'ml', 'l'].includes(normalizedFoodUnit)) return normalizedFoodUnit;
+    if (normalizedFoodUnit === 'item') {
+      if (/trung|egg|tao|chuoi|cam|quyt|xoai|chanh|ca chua/.test(normalizedName)) return 'quả';
+      return 'cái';
+    }
+  }
+  if (['kg', 'g', 'ml', 'l'].includes(normalizedUnit)) return normalizedUnit;
+  if (['qua', 'trai'].includes(normalizedUnit)) return 'quả';
+  if (['cai', 'item', 'piece'].includes(normalizedUnit)) {
+    if (/trung|egg|tao|chuoi|cam|quyt|xoai|chanh|ca chua/.test(normalizedName)) return 'quả';
+    return 'cái';
+  }
+  if (/sua|milk|nuoc|juice|soup|canh/.test(normalizedName)) return 'ml';
+  if (/trung|egg|tao|chuoi|cam|quyt|xoai|chanh|ca chua/.test(normalizedName)) return 'quả';
+  return 'g';
+}
+
+function normalizeRecipeQuantity(quantity: number, unit: string, ingredientName = '') {
+  const value = Number(quantity) > 0 ? Number(quantity) : 1;
+  const normalizedUnit = normalizeUnit(unit);
+  const normalizedName = normalizeFoodText(ingredientName);
+
+  if (normalizedUnit === 'kg') return Math.max(0.05, Math.round(value * 20) / 20);
+  if (normalizedUnit === 'g') {
+    const base = value < 25 ? 25 : Math.round(value / 25) * 25;
+    return Math.min(Math.max(base, 25), /thit|bo|ga|heo|ca|tom|protein/.test(normalizedName) ? 250 : 300);
+  }
+  if (normalizedUnit === 'l') return Math.max(0.05, Math.round(value * 20) / 20);
+  if (normalizedUnit === 'ml') {
+    const base = value < 25 ? 25 : Math.round(value / 25) * 25;
+    return Math.min(Math.max(base, 25), 500);
+  }
+  if (normalizedUnit === 'item' || ['qua', 'cai'].includes(normalizeFoodText(unit))) {
+    return Math.max(1, Math.round(value));
+  }
+  return Math.max(1, Math.round(value));
+}
+
+function estimateIngredientNutrition(ingredient: any) {
+  const name = normalizeFoodText(ingredient.ingredientName || ingredient.foodName || '');
+  const unit = normalizeUnit(ingredient.unit);
+  const rawQuantity = Number(ingredient.quantity) || 0;
+  let grams = rawQuantity;
+
+  if (unit === 'kg') grams = rawQuantity * 1000;
+  else if (unit === 'g') grams = rawQuantity;
+  else if (unit === 'l') grams = rawQuantity * 1000;
+  else if (unit === 'ml') grams = rawQuantity;
+  else if (unit === 'item' || ['qua', 'cai'].includes(normalizeFoodText(ingredient.unit))) {
+    grams = /trung|egg/.test(name) ? rawQuantity * 55 : rawQuantity * 100;
+  } else {
+    grams = rawQuantity * 100;
+  }
+
+  const per100 = /thit|bo|ga|heo|ca|tom|trung|egg|fish|chicken|beef|pork/.test(name)
+    ? { calories: 170, protein: 21, carbs: 0, fat: 8 }
+    : /gao|com|bun|mi|pho|khoai|bread|rice|noodle|oat/.test(name)
+      ? { calories: 130, protein: 3, carbs: 28, fat: 1 }
+      : /sua|yogurt|yaourt|milk|cheese/.test(name)
+        ? { calories: 65, protein: 3.5, carbs: 5, fat: 3 }
+        : /tao|chuoi|cam|xoai|nhan|fruit|banana|apple|orange|mango/.test(name)
+          ? { calories: 60, protein: 0.8, carbs: 14, fat: 0.2 }
+          : { calories: 35, protein: 1.5, carbs: 7, fat: 0.3 };
+
+  const factor = grams / 100;
+  return {
+    calories: roundTwo(per100.calories * factor),
+    macroSummary: {
+      protein: roundTwo(per100.protein * factor),
+      carbs: roundTwo(per100.carbs * factor),
+      fat: roundTwo(per100.fat * factor)
+    }
+  };
+}
+
+async function calculateRecipeNutrition(ingredients: any[] = []) {
+  const nutrition = await calculateNutritionForIngredients(ingredients);
+  const unmatched = Array.isArray((nutrition as any).unmatched) ? (nutrition as any).unmatched : [];
+  if (!unmatched.length) return nutrition;
+
+  const estimated = unmatched.reduce(
+    (acc: any, ingredient: any) => {
+      const item = estimateIngredientNutrition(ingredient);
+      acc.calories += item.calories;
+      acc.macroSummary = addMacros(acc.macroSummary, item.macroSummary);
+      return acc;
+    },
+    {
+      calories: Number(nutrition.calories) || 0,
+      macroSummary: nutrition.macroSummary || { protein: 0, carbs: 0, fat: 0 }
+    }
+  );
+
+  return {
+    ...nutrition,
+    calories: roundTwo(estimated.calories),
+    macroSummary: {
+      protein: roundTwo(estimated.macroSummary.protein),
+      carbs: roundTwo(estimated.macroSummary.carbs),
+      fat: roundTwo(estimated.macroSummary.fat)
+    }
+  };
+}
+
 function allocateCaloriesToMealTypes(
   mealTypes: string[],
   calorieMin: number,
@@ -601,18 +750,52 @@ function allocateCaloriesToMealTypes(
 ): MealCalorieAllocation[] {
   const count = Math.max(1, mealTypes.length);
   const finiteMax = Number.isFinite(calorieMax);
-  const baseMin = Math.floor(calorieMin / count);
-  const minRemainder = calorieMin - baseMin * count;
-  const baseMax = finiteMax ? Math.floor(calorieMax / count) : Infinity;
-  const maxRemainder = finiteMax ? calorieMax - baseMax * count : 0;
-  const baseTarget = Math.floor(calorieTarget / count);
-  const targetRemainder = calorieTarget - baseTarget * count;
-
-  return mealTypes.map((mealType, index) => ({
+  const baseMin = Math.floor(Math.max(0, calorieMin) / count);
+  const minRemainder = Math.max(0, calorieMin) - baseMin * count;
+  const baseMax = finiteMax ? Math.floor(Math.max(calorieMax, calorieMin || calorieTarget) / count) : Infinity;
+  const maxRemainder = finiteMax ? Math.max(calorieMax, calorieMin || calorieTarget) - baseMax * count : 0;
+  const minSlots = mealTypes.map((mealType, index) => ({
     mealType,
     min: baseMin + (index < minRemainder ? 1 : 0),
-    max: finiteMax ? baseMax + (index < maxRemainder ? 1 : 0) : Infinity,
-    target: baseTarget + (index < targetRemainder ? 1 : 0)
+    max: finiteMax ? baseMax + (index < maxRemainder ? 1 : 0) : Infinity
+  }));
+  const totalMin = minSlots.reduce((sum, item) => sum + item.min, 0);
+  const totalMax = finiteMax
+    ? minSlots.reduce((sum, item) => sum + Number(item.max), 0)
+    : Math.max(totalMin + count * 250, calorieTarget);
+  const totalTarget = finiteMax && totalMax > totalMin
+    ? randomInt(totalMin, totalMax)
+    : randomInt(Math.max(0, Math.round(calorieTarget * 0.9)), Math.max(1, Math.round(calorieTarget * 1.1)));
+  let remaining = Math.max(0, totalTarget - totalMin);
+  const weights = mealTypes.map(() => 0.7 + Math.random() * 0.8);
+  const weightSum = weights.reduce((sum, value) => sum + value, 0) || 1;
+  const targets = minSlots.map((slot, index) => {
+    const capacity = Number.isFinite(slot.max) ? Math.max(0, Number(slot.max) - slot.min) : remaining;
+    const proposed = Math.round((totalTarget - totalMin) * (weights[index] / weightSum));
+    const extra = Math.min(capacity, proposed);
+    remaining -= extra;
+    return slot.min + extra;
+  });
+
+  let guard = 0;
+  while (remaining > 0 && guard < 100) {
+    const index = randomInt(0, targets.length - 1);
+    const capacity = Number.isFinite(minSlots[index].max)
+      ? Number(minSlots[index].max) - targets[index]
+      : remaining;
+    if (capacity > 0) {
+      const extra = Math.min(remaining, capacity, randomInt(1, Math.max(1, Math.min(80, capacity))));
+      targets[index] += extra;
+      remaining -= extra;
+    }
+    guard += 1;
+  }
+
+  return minSlots.map((slot, index) => ({
+    mealType: slot.mealType,
+    min: slot.min,
+    max: slot.max,
+    target: targets[index]
   }));
 }
 
@@ -650,12 +833,10 @@ function findMatchingFood(ingredient: any, foods: InventoryPriorityFood[]) {
     if (!matchesIngredient(food.foodName, ingredient.ingredientName)) return false;
     const requiredQty = Number(ingredient.quantity) || 0;
     const availableQty = Number(food.quantity) || 0;
-    const foodUnit = normalize(food.unit || '');
-    const ingredientUnit = normalize(ingredient.unit || '');
-    const unitMatches = !foodUnit || !ingredientUnit || foodUnit === ingredientUnit;
-    if (!unitMatches) return false;
+    const convertedRequired = convertQuantity(requiredQty, ingredient.unit, food.unit);
+    if (convertedRequired === null) return false;
     if (requiredQty <= 0) return availableQty > 0;
-    return availableQty >= requiredQty;
+    return availableQty >= convertedRequired;
   });
 }
 
@@ -667,7 +848,7 @@ function analyzeRecipeAvailability(
   const missingIngredients: RecipeAvailabilityAnalysis['missingIngredients'] = [];
 
   ingredients
-    .filter((ingredient) => ingredient.isRequired !== false)
+    .filter((ingredient) => ingredient.isRequired !== false && !isBasicPantryIngredient(ingredient.ingredientName))
     .forEach((ingredient) => {
       const matchedFood = findMatchingFood(ingredient, foods);
       if (matchedFood) {
@@ -676,7 +857,7 @@ function analyzeRecipeAvailability(
         missingIngredients.push({
           ingredientName: ingredient.ingredientName,
           quantity: Number(ingredient.quantity) || 1,
-          unit: ingredient.unit || 'serving',
+          unit: ingredient.unit || 'g',
           categoryId: ingredient.categoryId,
           categoryName: ingredient.categoryName
         });
@@ -722,11 +903,12 @@ function buildRecommendation(recipe: any, metadata: any) {
 }
 
 function buildIngredientFromFood(food: InventoryPriorityFood) {
+  const unit = inferRecipeUnit(food.foodName, food.unit, food);
   return {
     ingredientName: food.foodName,
     categoryId: food.categoryId,
-    quantity: getPortionQuantity(food),
-    unit: food.unit || 'serving',
+    quantity: normalizeRecipeQuantity(getPortionQuantity(food), unit, food.foodName),
+    unit,
     isRequired: true
   };
 }
@@ -1095,11 +1277,11 @@ function buildFallbackRecipeDrafts(
         availabilityStatus: 'MISSING_INGREDIENTS',
         ingredients: [
           buildIngredientFromFood(baseFood),
-          { ingredientName: extraName, quantity: 1, unit: 'serving', isRequired: true }
+          { ingredientName: extraName, quantity: getFoodGroup(baseFood) === 'fruit' ? 100 : 150, unit: 'g', isRequired: true }
         ],
         cookingSteps: [
           `Sơ chế ${baseFood.foodName}.`,
-          `Chuẩn bị ${extraName} và gia vị vừa ăn.`,
+          `Chuẩn bị ${extraName}.`,
           'Chế biến nhanh, trình bày gọn và dùng ngay.'
         ],
         cookingTime: 15,
@@ -1137,7 +1319,9 @@ function sanitizeDraftIngredients(
     : fallbackFoods.map(buildIngredientFromFood);
   const rawIngredients = [...baseIngredients, ...missingIngredients].filter((ingredient, index, all) => {
     const name = normalize(String(ingredient.ingredientName || ''));
-    return name && all.findIndex((item) => normalize(String(item.ingredientName || '')) === name) === index;
+    return name &&
+      !isBasicPantryIngredient(ingredient.ingredientName) &&
+      all.findIndex((item) => normalize(String(item.ingredientName || '')) === name) === index;
   });
 
   return rawIngredients
@@ -1145,12 +1329,13 @@ function sanitizeDraftIngredients(
       const ingredientName = String(ingredient.ingredientName || '').trim();
       if (!ingredientName) return null;
       const matchedFood = priorityFoods.find((food) => matchesIngredient(food.foodName, ingredientName));
+      const unit = inferRecipeUnit(ingredientName, ingredient.unit, matchedFood);
       return {
         ingredientName: matchedFood?.foodName || ingredientName,
         categoryId: matchedFood?.categoryId,
         categoryName: (ingredient as any).categoryName,
-        quantity: Number(ingredient.quantity) > 0 ? roundQuantity(Number(ingredient.quantity)) : 1,
-        unit: ingredient.unit || matchedFood?.unit || 'serving',
+        quantity: normalizeRecipeQuantity(Number(ingredient.quantity) > 0 ? Number(ingredient.quantity) : 1, unit, ingredientName),
+        unit,
         isRequired: ingredient.isRequired !== false
       };
     })
@@ -1164,7 +1349,7 @@ async function fitIngredientsToAllocation(
   availabilityStatus: AvailabilityStatus
 ) {
   let currentIngredients = ingredients.map((ingredient) => ({ ...ingredient }));
-  let nutrition = await calculateNutritionForIngredients(currentIngredients);
+  let nutrition = await calculateRecipeNutrition(currentIngredients);
   const calories = Number(nutrition.calories) || 0;
 
   if (!calories || isWithinCalorieRange(calories, allocation.min, allocation.max)) {
@@ -1176,7 +1361,7 @@ async function fitIngredientsToAllocation(
 
   currentIngredients = currentIngredients.map((ingredient) => {
     const matchedFood = findMatchingFood(ingredient, priorityFoods);
-    const scaledQuantity = roundQuantity((Number(ingredient.quantity) || 1) * scale);
+    const scaledQuantity = normalizeRecipeQuantity((Number(ingredient.quantity) || 1) * scale, ingredient.unit, ingredient.ingredientName);
     const cappedQuantity =
       availabilityStatus === 'ENOUGH_INGREDIENTS' && matchedFood && normalize(matchedFood.unit) === normalize(ingredient.unit)
         ? Math.min(scaledQuantity, Number(matchedFood.quantity) || scaledQuantity)
@@ -1188,7 +1373,7 @@ async function fitIngredientsToAllocation(
     };
   });
 
-  nutrition = await calculateNutritionForIngredients(currentIngredients);
+  nutrition = await calculateRecipeNutrition(currentIngredients);
   return { ingredients: currentIngredients, nutrition };
 }
 
@@ -1212,7 +1397,7 @@ function dedupeRecommendations(items: any[]) {
 
 async function buildGeneratedRecipe(userId: string, foods: InventoryPriorityFood[], mealType: string, data: any) {
   const ingredients = foods.map(buildIngredientFromFood);
-  const nutrition = await calculateNutritionForIngredients(ingredients);
+  const nutrition = await calculateRecipeNutrition(ingredients);
   const recipeName = buildSmartFallbackRecipeName(foods, mealType);
   const cookingSteps = buildCookingSteps(recipeName, foods);
   const priorityReasons = buildComboPriorityReasons(foods, Number(data.calorieTarget || 0), data.weather);

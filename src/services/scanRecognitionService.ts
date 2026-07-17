@@ -8,6 +8,7 @@ import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
 import { resolveNutritionForFood } from './nutritionService';
 import {
   FoodCategoryLike,
+  getFoodCategoryHintKeys,
   normalizeFoodText,
 } from '../utils/foodCategoryValidation';
 
@@ -311,12 +312,14 @@ function findCategoryByName(categoryName: string | undefined, categories: FoodCa
 
 function hasNormalizedTerm(source: string, term: string) {
   if (!source || !term || term.length < 2) return false;
+  if (term === 'ca' && source !== term) return false;
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
   return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(source);
 }
 
 function scoreCategoryForFoodName(foodName: string, category: FoodCategoryLike) {
   const source = normalizeFoodText(foodName);
+  const hintKeys = getFoodCategoryHintKeys(foodName);
   const scoreGroups = [
     { weight: 6, values: category.foodExamples || [] },
     { weight: 4, values: category.keywords || [] },
@@ -324,7 +327,17 @@ function scoreCategoryForFoodName(foodName: string, category: FoodCategoryLike) 
     { weight: 1, values: [category.displayName, category.categoryName] },
   ];
 
-  return scoreGroups.reduce((score, group) => {
+  const hintScore = hintKeys.some((hintKey) => {
+    const categoryKeys = [
+      category.categoryName,
+      category.displayName,
+      ...(category.aliases || []),
+      ...(category.keywords || []),
+    ].map((value) => normalizeFoodText(value || ''));
+    return categoryKeys.includes(hintKey);
+  }) ? 12 : 0;
+
+  return hintScore + scoreGroups.reduce((score, group) => {
     const matched = group.values.some((value) => hasNormalizedTerm(source, normalizeFoodText(value || '')));
     return matched ? score + group.weight : score;
   }, 0);
@@ -344,10 +357,13 @@ function findBestCategoryByFoodName(foodName: string | undefined, categories: Fo
 }
 
 function mapCandidateToCategory(candidate: GeminiScanCandidate, categories: FoodCategoryLike[]) {
+  const byFoodName = findBestCategoryByFoodName(candidate.foodName, categories);
+  if (byFoodName) return byFoodName;
+
   const direct = findCategoryByName(candidate.categoryName, categories);
   if (direct) return direct;
 
-  return findBestCategoryByFoodName(candidate.foodName, categories);
+  return undefined;
 }
 
 function normalizeStorageType(value?: string) {
