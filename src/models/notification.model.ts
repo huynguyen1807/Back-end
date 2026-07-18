@@ -11,7 +11,7 @@ const notificationSchema = new Schema(
     message: { type: String, required: true },
     type: {
       type: String,
-      enum: ['EXPIRY_ALERT', 'STORAGE_WARNING', 'MEAL_REMINDER', 'FAMILY_SYNC', 'PAYMENT_RESULT'],
+      enum: ['EXPIRY_ALERT', 'STORAGE_WARNING', 'MEAL_REMINDER', 'FAMILY_SYNC', 'PAYMENT_RESULT', 'SUPPORT_UPDATE'],
       required: true
     },
     priority: { type: String, enum: ['LOW', 'MEDIUM', 'HIGH'], default: 'MEDIUM' },

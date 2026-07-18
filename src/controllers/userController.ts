@@ -60,3 +60,32 @@ export const updatePushToken = async (req: AuthRequest, res: Response): Promise<
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
+import { SupportTicket } from '../models/supportTicket.model';
+
+export const createSupportTicket = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ message: 'Not authorized' });
+      return;
+    }
+
+    const { content, category } = req.body;
+    if (!content) {
+      res.status(400).json({ success: false, message: 'Nội dung không được để trống' });
+      return;
+    }
+
+    const newTicket = new SupportTicket({
+      userId,
+      category: category || 'OTHER',
+      content
+    });
+    await newTicket.save();
+
+    res.status(201).json({ success: true, message: 'Đã gửi yêu cầu hỗ trợ thành công' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
