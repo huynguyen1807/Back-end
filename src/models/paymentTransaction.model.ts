@@ -8,15 +8,17 @@ const paymentTransactionSchema = new Schema(
     planId: { type: objectId, ref: 'SubscriptionPlan', required: true },
     subscriptionId: { type: objectId, ref: 'Subscription', required: true },
     transactionCode: { type: String, required: true, unique: true },
+    revenueCatEventId: { type: String, unique: true, sparse: true },
+    productId: String,
     gatewayTransactionId: String,
     paymentGateway: {
       type: String,
-      enum: ['MOMO', 'VNPAY', 'STRIPE', 'SANDBOX'],
+      enum: ['REVENUECAT', 'MOMO', 'VNPAY', 'STRIPE', 'SANDBOX'],
       required: true
     },
     paymentMethod: {
       type: String,
-      enum: ['QR', 'BANK_CARD', 'E_WALLET', 'SANDBOX'],
+      enum: ['IN_APP_PURCHASE', 'BANK_CARD', 'E_WALLET', 'SANDBOX'],
       required: true
     },
     amount: { type: Number, required: true, min: 0 },

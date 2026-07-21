@@ -35,7 +35,7 @@ const DEFAULT_PLANS = [
   {
     planName: 'Premium Yearly',
     planCode: 'PREMIUM_YEARLY',
-    price: 490000,
+    price: 499000,
     currency: 'VND',
     durationDays: 365,
     limits: {
@@ -80,6 +80,7 @@ export const getUserCurrentSubscription = async (userId: string) => {
     // If no active premium, return the free plan as default
     const freePlan = await SubscriptionPlan.findOne({ planCode: 'FREE' });
     return {
+      appUserId: userId,
       planCode: 'FREE',
       planId: freePlan,
       status: 'ACTIVE',
@@ -90,6 +91,7 @@ export const getUserCurrentSubscription = async (userId: string) => {
 
   return {
     ...currentSubscription.toObject(),
+    appUserId: userId,
     isPremium: ['PREMIUM_MONTHLY', 'PREMIUM_YEARLY'].includes(currentSubscription.planCode),
     // @ts-ignore
     limits: currentSubscription.planId?.limits
