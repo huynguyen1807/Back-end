@@ -15,7 +15,11 @@ import nutritionRouter from './nutritionRoutes';
 import adminRouter from './adminRoutes';
 import shoppingListRouter from './shoppingListRoutes';
 import paymentRouter from './paymentRoutes';
+<<<<<<< HEAD
 import uploadRouter from './uploadRoutes';
+=======
+import mapsRouter from './mapsRoutes';
+>>>>>>> fd0762e (Update: Maps API key)
 
 const apiRouter = Router();
 
@@ -30,6 +34,7 @@ apiRouter.use('/nutrition', nutritionRouter);
 apiRouter.use('/admin', adminRouter);
 apiRouter.use('/shopping-lists', shoppingListRouter);
 apiRouter.use('/payments', paymentRouter);
+apiRouter.use('/maps', mapsRouter);
 apiRouter.use('/storage-locations', storageRouter);
 apiRouter.use('/storage', storageRouter);
 apiRouter.use('/ai', aiRouter);
