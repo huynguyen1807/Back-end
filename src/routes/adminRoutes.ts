@@ -21,11 +21,21 @@ import {
   adminUpdateRecipe,
   adminUpdateStorageRule
 } from '../controllers/adminDataController';
+import { adminListUsers, adminRemoveUserFromHousehold, adminGetStats, adminListTickets, adminResolveTicket } from '../controllers/adminUserController';
 import { protect, restrictTo } from '../middleware/authMiddleware';
 
 const router = Router();
 
 router.use(protect, restrictTo('ADMIN'));
+
+// User Management & Support
+router.get('/stats', adminGetStats);
+router.get('/users', adminListUsers);
+router.post('/users/:userId/remove-household', adminRemoveUserFromHousehold);
+
+// Tickets Support
+router.get('/support', adminListTickets);
+router.patch('/support/:ticketId/resolve', adminResolveTicket);
 
 router.get('/nutrition-facts', adminListNutritionFacts);
 router.post('/nutrition-facts', adminCreateNutritionFact);
