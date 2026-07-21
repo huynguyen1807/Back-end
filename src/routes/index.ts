@@ -15,6 +15,7 @@ import nutritionRouter from './nutritionRoutes';
 import adminRouter from './adminRoutes';
 import shoppingListRouter from './shoppingListRoutes';
 import paymentRouter from './paymentRoutes';
+import uploadRouter from './uploadRoutes';
 
 const apiRouter = Router();
 
@@ -34,5 +35,6 @@ apiRouter.use('/storage', storageRouter);
 apiRouter.use('/ai', aiRouter);
 apiRouter.use('/notifications', notificationRouter);
 apiRouter.use('/households', householdRouter);
+apiRouter.use('/upload', uploadRouter);
 
 export default apiRouter;
