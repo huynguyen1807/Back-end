@@ -2,6 +2,7 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/authMiddleware';
 import {
+  addMealToPlan,
   createMealPlan,
   deleteMealPlan,
   extractRecipeFromVideo,
@@ -17,7 +18,12 @@ function isMealPlanBadRequest(message = '') {
     message.includes('required') ||
     message.includes('not found') ||
     message.includes('Not enough') ||
-    message.includes('not compatible')
+    message.includes('not compatible') ||
+    message.includes('invalid') ||
+    message.includes('must use') ||
+    message.includes('must not be after') ||
+    message.includes('already exists') ||
+    message.includes('Cannot schedule')
   );
 }
 
@@ -26,7 +32,18 @@ export const listPlans = async (req: AuthRequest, res: Response) => {
     const plans = await listMealPlans(req.user!.userId, req.query);
     res.json({ success: true, data: plans });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(isMealPlanBadRequest(error.message) ? 400 : 500)
+      .json({ success: false, message: error.message });
+  }
+};
+
+export const addMeal = async (req: AuthRequest, res: Response) => {
+  try {
+    const plan = await addMealToPlan(req.user!.userId, req.body);
+    res.status(201).json({ success: true, data: plan });
+  } catch (error: any) {
+    res.status(isMealPlanBadRequest(error.message) ? 400 : 500)
+      .json({ success: false, message: error.message });
   }
 };
 

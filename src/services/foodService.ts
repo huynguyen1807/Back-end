@@ -3,12 +3,12 @@ import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
 import { HouseholdMember } from '../models/householdMember.model';
 import { Notification } from '../models/notification.model';
-import { resolveNutritionForFood } from './nutritionService';
+import { buildInventoryNutritionDisplay, resolveNutritionForFood } from './nutritionService';
 import { FoodCategoryLike, FoodCategoryValidationResult } from '../utils/foodCategoryValidation';
 import { classifyFoodCategory } from './foodCategoryClassifierService';
 import { Household } from '../models/household.model';
 import { getUserCurrentSubscription } from './subscriptionService';
-import { defaultNutritionBaseQuantity, normalizeNutritionUnit } from '../utils/nutritionUnits';
+import { validateNutritionSnapshot } from '../utils/nutritionValidation';
 
 const CATEGORY_SELECT = 'categoryName displayName description aliases keywords foodExamples sortOrder';
 
@@ -90,33 +90,7 @@ function neutralCategoryValidation(): FoodCategoryValidationResult {
 }
 
 function sanitizeNutritionSnapshot(value: any, fallbackUnit?: string) {
-  if (!value || typeof value !== 'object') return undefined;
-
-  const calories = Math.max(0, Number(value.calories) || 0);
-  const protein = Math.max(0, Number(value.protein) || 0);
-  const carbs = Math.max(0, Number(value.carbs) || 0);
-  const fat = Math.max(0, Number(value.fat) || 0);
-  if (!calories && !protein && !carbs && !fat) return undefined;
-
-  const unit = String(value.unit || fallbackUnit || 'g').trim();
-  const normalizedUnit = normalizeNutritionUnit(unit);
-  const baseQuantity = Number(value.baseQuantity) > 0
-    ? Number(value.baseQuantity)
-    : defaultNutritionBaseQuantity(normalizedUnit);
-
-  return {
-    calories,
-    protein,
-    carbs,
-    fat,
-    baseQuantity,
-    unit,
-    source: ['SCAN_AI', 'ADMIN', 'CATEGORY_ESTIMATE'].includes(value.source)
-      ? value.source
-      : 'SCAN_AI',
-    confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)),
-    capturedAt: value.capturedAt ? new Date(value.capturedAt) : new Date(),
-  };
+  return validateNutritionSnapshot(value, fallbackUnit).value;
 }
 
 async function createCategoryMismatchNotification(userId: string, foodItem: any, validation?: FoodCategoryValidationResult) {
@@ -216,14 +190,26 @@ async function enrichFoodNutrition(
     unit: raw.unit,
     nutritionSnapshot: raw.nutritionSnapshot,
   });
+  const nutritionDisplay = buildInventoryNutritionDisplay(nutrition, raw.quantity, raw.unit);
+  const totalNutrition = {
+    calories: nutrition.calories,
+    macroSummary: nutrition.macroSummary,
+  };
 
   return {
     ...raw,
-    calories: nutrition.calories,
-    macroSummary: nutrition.macroSummary,
+    calories: totalNutrition.calories,
+    macroSummary: totalNutrition.macroSummary,
+    totalNutrition,
+    nutritionReference: nutrition.referenceNutrition,
+    nutritionDisplay: {
+      ...nutritionDisplay,
+      source: nutrition.source,
+      estimated: nutrition.estimated,
+      matched: nutrition.matched,
+    },
     nutrition: {
-      calories: nutrition.calories,
-      macroSummary: nutrition.macroSummary,
+      ...totalNutrition,
       matched: nutrition.matched,
       nutritionFactId: nutrition.nutritionFactId,
       unit: nutrition.unit,
@@ -323,7 +309,7 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
 
   // Validate storage location belongs to user
   const location = await StorageLocation.findOne({ _id: storageLocationId, ...buildOwnerQuery(context), isActive: true });
-  if (!location) throw new Error('Storage location not found or not available for this inventory');
+  if (!location) throw new Error('Vị trí lưu trữ không tồn tại hoặc không thuộc kho đang chọn');
 
   const expiry = new Date(expiryDate);
   const purchase = new Date(purchaseDate);
@@ -391,7 +377,7 @@ export async function updateFoodItem(foodId: string, userId: string, data: any, 
       ...buildOwnerQuery(context),
       isActive: true
     });
-    if (!location) throw new Error('Storage location not found or not available for this inventory');
+    if (!location) throw new Error('Vị trí lưu trữ không tồn tại hoặc không thuộc kho đang chọn');
   }
 
   const nextCategoryId = updateData.categoryId ?? item.categoryId;

@@ -1,4 +1,5 @@
 import { Recipe } from '../models/recipe.model';
+import { RecipeRecommendationState } from '../models/recipeRecommendationState.model';
 import { calculateNutritionForIngredients } from './nutritionService';
 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -66,6 +67,11 @@ export async function listRecipes(userId: string, query: any = {}, isAdmin = fal
   if (!isAdmin) {
     filter.isActive = true;
     filter.$or = [{ sourceType: 'SYSTEM' }, { createdBy: userId }];
+    const dismissedRecipeIds = await RecipeRecommendationState.distinct('recipeId', {
+      userId,
+      status: 'DISMISSED',
+    });
+    if (dismissedRecipeIds.length) filter._id = { $nin: dismissedRecipeIds };
   } else if (query.isActive !== undefined) {
     filter.isActive = query.isActive === 'true' || query.isActive === true;
   }
@@ -79,6 +85,24 @@ export async function listRecipes(userId: string, query: any = {}, isAdmin = fal
   return Recipe.find(filter)
     .populate('createdBy', 'fullName email role')
     .sort({ updatedAt: -1, recipeName: 1 });
+}
+
+export async function dismissRecipeRecommendation(recipeId: string, userId: string) {
+  const recipe = await Recipe.findOne({
+    _id: recipeId,
+    isActive: true,
+    sourceType: { $in: ['SYSTEM', 'AI_GENERATED'] },
+    $or: [{ sourceType: 'SYSTEM' }, { createdBy: userId }],
+  }).select('_id');
+  if (!recipe) throw new Error('Recipe recommendation not found');
+
+  await RecipeRecommendationState.findOneAndUpdate(
+    { userId, recipeId },
+    { userId, recipeId, status: 'DISMISSED' },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true },
+  );
+
+  return { message: 'Recipe recommendation dismissed' };
 }
 
 export async function getRecipeById(recipeId: string, userId: string, isAdmin = false) {

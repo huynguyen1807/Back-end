@@ -4,7 +4,9 @@ import { NutritionFact } from '../models/nutritionFact.model';
 import { NutritionReport } from '../models/nutritionReport.model';
 import { normalizeFoodText } from '../utils/foodCategoryValidation';
 import {
+  convertNutritionQuantity,
   defaultNutritionBaseQuantity,
+  normalizeNutritionUnit,
   resolveNutritionFactor,
 } from '../utils/nutritionUnits';
 
@@ -12,6 +14,13 @@ type MacroSummary = {
   protein: number;
   carbs: number;
   fat: number;
+};
+
+export type NutritionReference = {
+  calories: number;
+  macroSummary: MacroSummary;
+  basisQuantity: number;
+  basisUnit: string;
 };
 
 type IngredientInput = {
@@ -185,6 +194,102 @@ function calculateFromSource(
   };
 }
 
+function buildNutritionReference(
+  source: { calories?: number; protein?: number; carbs?: number; fat?: number; unit?: string; baseQuantity?: number },
+): NutritionReference {
+  return {
+    calories: round(Number(source.calories) || 0),
+    macroSummary: {
+      protein: round(Number(source.protein) || 0),
+      carbs: round(Number(source.carbs) || 0),
+      fat: round(Number(source.fat) || 0),
+    },
+    basisQuantity: Number(source.baseQuantity) > 0
+      ? Number(source.baseQuantity)
+      : defaultNutritionBaseQuantity(source.unit),
+    basisUnit: String(source.unit || 'g'),
+  };
+}
+
+export function calculateNutritionFromReference(
+  reference: NutritionReference,
+  quantity: number,
+  unit: string,
+) {
+  return calculateFromSource(quantity, unit, {
+    calories: reference.calories,
+    protein: reference.macroSummary.protein,
+    carbs: reference.macroSummary.carbs,
+    fat: reference.macroSummary.fat,
+    unit: reference.basisUnit,
+    baseQuantity: reference.basisQuantity,
+  });
+}
+
+export function buildInventoryNutritionDisplay(
+  nutrition: {
+    calories: number;
+    macroSummary: MacroSummary;
+    referenceNutrition?: NutritionReference;
+  },
+  inventoryQuantity: number,
+  inventoryUnit?: string,
+) {
+  const normalizedUnit = normalizeNutritionUnit(inventoryUnit);
+  const quantity = Math.max(0, Number(inventoryQuantity) || 0);
+  const total = { calories: nutrition.calories, macroSummary: nutrition.macroSummary };
+  const reference = nutrition.referenceNutrition;
+
+  if (!reference || quantity <= 0) {
+    return { ...total, basisQuantity: quantity, basisUnit: normalizedUnit || inventoryUnit || '', isTotalInventory: true };
+  }
+
+  const baseUnit = ['g', 'kg'].includes(normalizedUnit)
+    ? 'g'
+    : ['ml', 'l'].includes(normalizedUnit)
+      ? 'ml'
+      : undefined;
+
+  if (baseUnit) {
+    const baseAmount = convertNutritionQuantity(quantity, normalizedUnit, baseUnit);
+    if (baseAmount >= 100) {
+      return {
+        ...calculateNutritionFromReference(reference, 100, baseUnit),
+        basisQuantity: 100,
+        basisUnit: baseUnit,
+        isTotalInventory: false,
+      };
+    }
+    return {
+      ...total,
+      basisQuantity: round(baseAmount),
+      basisUnit: baseUnit,
+      isTotalInventory: true,
+    };
+  }
+
+  if (quantity > 1) {
+    return {
+      calories: round(total.calories / quantity),
+      macroSummary: {
+        protein: round(total.macroSummary.protein / quantity),
+        carbs: round(total.macroSummary.carbs / quantity),
+        fat: round(total.macroSummary.fat / quantity),
+      },
+      basisQuantity: 1,
+      basisUnit: normalizedUnit || inventoryUnit || 'item',
+      isTotalInventory: false,
+    };
+  }
+
+  return {
+    ...total,
+    basisQuantity: quantity,
+    basisUnit: normalizedUnit || inventoryUnit || 'item',
+    isTotalInventory: true,
+  };
+}
+
 export async function resolveNutritionForFood(input: IngredientInput) {
   const foodName = (input.ingredientName || input.foodName || '').trim();
   const quantity = Number(input.quantity) || 0;
@@ -199,6 +304,7 @@ export async function resolveNutritionForFood(input: IngredientInput) {
       source: 'UNAVAILABLE',
       unit: undefined,
       baseQuantity: undefined,
+      referenceNutrition: undefined,
     };
   }
 
@@ -221,6 +327,14 @@ export async function resolveNutritionForFood(input: IngredientInput) {
       source: 'NUTRITION_FACT',
       unit: fact.unit,
       baseQuantity: fact.baseQuantity || defaultNutritionBaseQuantity(fact.unit),
+      referenceNutrition: buildNutritionReference({
+        calories: fact.caloriesPerUnit,
+        protein: fact.protein,
+        carbs: fact.carbs,
+        fat: fact.fat,
+        unit: fact.unit,
+        baseQuantity: fact.baseQuantity || defaultNutritionBaseQuantity(fact.unit),
+      }),
     };
   }
 
@@ -231,10 +345,11 @@ export async function resolveNutritionForFood(input: IngredientInput) {
       ...totals,
       nutritionFactId: undefined,
       matched: true,
-      estimated: snapshot.source === 'CATEGORY_ESTIMATE',
+      estimated: snapshot.source !== 'ADMIN',
       source: snapshot.source || 'SCAN_AI',
       unit: snapshot.unit,
       baseQuantity: snapshot.baseQuantity,
+      referenceNutrition: buildNutritionReference(snapshot),
     };
   }
 
@@ -252,6 +367,7 @@ export async function resolveNutritionForFood(input: IngredientInput) {
       source: 'CATEGORY_ESTIMATE',
       unit: baseline.unit,
       baseQuantity: 100,
+      referenceNutrition: buildNutritionReference({ ...baseline, baseQuantity: 100 }),
     };
   }
 
@@ -264,6 +380,7 @@ export async function resolveNutritionForFood(input: IngredientInput) {
     source: 'UNAVAILABLE',
     unit: undefined,
     baseQuantity: undefined,
+    referenceNutrition: undefined,
   };
 }
 

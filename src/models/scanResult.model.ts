@@ -5,6 +5,7 @@ import { existingModel, objectId } from './modelHelpers';
 const scanResultSchema = new Schema(
   {
     userId: { type: objectId, ref: 'User', required: true },
+    ownerType: { type: String, enum: ['USER', 'HOUSEHOLD'] },
     householdId: { type: objectId, ref: 'Household' },
     scanType: { type: String, enum: ['BARCODE', 'EXPIRY_DATE', 'FOOD_IMAGE'], required: true },
     imageUrl: String,
@@ -38,5 +39,6 @@ const scanResultSchema = new Schema(
 );
 
 scanResultSchema.index({ userId: 1, createdAt: -1 });
+scanResultSchema.index({ householdId: 1, createdAt: -1 });
 
 export const ScanResult = existingModel('ScanResult', scanResultSchema, 'scan_results');

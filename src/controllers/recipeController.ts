@@ -4,10 +4,20 @@ import { AuthRequest } from '../middleware/authMiddleware';
 import {
   createRecipe,
   deleteRecipe,
+  dismissRecipeRecommendation,
   getRecipeById,
   listRecipes,
   updateRecipe
 } from '../services/recipeService';
+
+export const dismissRecipeRecommendationItem = async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await dismissRecipeRecommendation(req.params.id as string, req.user!.userId);
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    res.status(error.message.includes('not found') ? 404 : 500).json({ success: false, message: error.message });
+  }
+};
 
 export const listRecipeItems = async (req: AuthRequest, res: Response) => {
   try {

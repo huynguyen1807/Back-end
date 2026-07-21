@@ -3,6 +3,7 @@ import { Router } from 'express';
 import {
   createRecipeItem,
   deleteRecipeItem,
+  dismissRecipeRecommendationItem,
   getRecipeItem,
   listRecipeItems,
   updateRecipeItem
@@ -15,6 +16,7 @@ router.use(protect);
 
 router.get('/', listRecipeItems);
 router.post('/', createRecipeItem);
+router.patch('/:id/recommendation/dismiss', dismissRecipeRecommendationItem);
 router.get('/:id', getRecipeItem);
 router.put('/:id', updateRecipeItem);
 router.delete('/:id', deleteRecipeItem);

@@ -28,7 +28,10 @@ const mealSchema = new Schema(
     recipeId: { type: objectId, ref: 'Recipe' },
     recipeName: { type: String, required: true },
     imageUrl: String,
-    scheduledTime: String,
+    scheduledTime: {
+      type: String,
+      match: /^([01]\d|2[0-3]):([0-5]\d)$/,
+    },
     calories: { type: Number, min: 0 },
     macroSummary: {
       protein: { type: Number, default: 0, min: 0 },
@@ -49,6 +52,8 @@ const mealPlanSchema = new Schema(
     inventoryOwnerType: { type: String, enum: ['USER', 'HOUSEHOLD'], default: 'USER' },
     householdId: { type: objectId, ref: 'Household' },
     planDate: { type: Date, required: true },
+    planDateKey: { type: String, match: /^\d{4}-\d{2}-\d{2}$/ },
+    inventoryContextKey: { type: String },
     goal: String,
     totalCalories: { type: Number, min: 0 },
     meals: [mealSchema],
@@ -65,5 +70,16 @@ const mealPlanSchema = new Schema(
 
 mealPlanSchema.index({ userId: 1, planDate: 1 });
 mealPlanSchema.index({ householdId: 1, planDate: 1 });
+mealPlanSchema.index(
+  { userId: 1, inventoryContextKey: 1, planDateKey: 1 },
+  {
+    name: 'unique_user_inventory_context_plan_day',
+    unique: true,
+    partialFilterExpression: {
+      inventoryContextKey: { $type: 'string' },
+      planDateKey: { $type: 'string' },
+    },
+  },
+);
 
 export const MealPlan = existingModel('MealPlan', mealPlanSchema, 'meal_plans');

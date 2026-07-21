@@ -8,7 +8,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "seed:food-categories": "tsx src/seeders/foodCategoryMetadata.ts",
-    "migrate:nutrition": "tsx src/migrations/normalizeNutritionFacts.ts"
+    "migrate:nutrition": "tsx src/migrations/normalizeNutritionFacts.ts",
+    "migrate:meal-plans": "tsx src/migrations/normalizeMealPlans.ts",
+    "test:schedule": "tsx --test src/utils/mealSchedule.test.ts",
+    "test:schedule:db": "tsx src/tests/mealPlanPersistence.integration.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

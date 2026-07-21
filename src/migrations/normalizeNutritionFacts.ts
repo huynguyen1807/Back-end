@@ -13,6 +13,7 @@ import {
   resolveNutritionForFood,
 } from '../services/nutritionService';
 import { defaultNutritionBaseQuantity } from '../utils/nutritionUnits';
+import { validateNutritionSnapshot } from '../utils/nutritionValidation';
 
 type NutritionSeed = {
   foodName: string;
@@ -107,6 +108,48 @@ async function backfillRecipeNutrition() {
   }
 
   return updated;
+}
+
+async function normalizeFoodNutritionSnapshots() {
+  const foods = await FoodItem.find({ nutritionSnapshot: { $exists: true } })
+    .select('_id unit nutritionSnapshot')
+    .lean();
+  let normalized = 0;
+  let removed = 0;
+
+  for (const food of foods) {
+    const validation = validateNutritionSnapshot(food.nutritionSnapshot, food.unit);
+    if (!validation.value) {
+      await FoodItem.updateOne(
+        { _id: food._id },
+        { $unset: { nutritionSnapshot: '' } },
+      );
+      removed += 1;
+      continue;
+    }
+
+    const current = food.nutritionSnapshot as any;
+    const next = validation.value;
+    const changed =
+      Number(current?.calories) !== next.calories
+      || Number(current?.protein) !== next.protein
+      || Number(current?.carbs) !== next.carbs
+      || Number(current?.fat) !== next.fat
+      || Number(current?.baseQuantity) !== next.baseQuantity
+      || String(current?.unit || '') !== next.unit
+      || String(current?.source || '') !== next.source
+      || !current?.capturedAt;
+
+    if (changed) {
+      await FoodItem.updateOne(
+        { _id: food._id },
+        { $set: { nutritionSnapshot: next } },
+      );
+      normalized += 1;
+    }
+  }
+
+  return { normalized, removed };
 }
 
 async function backfillMealPlanNutrition() {
@@ -214,6 +257,7 @@ async function main() {
   const normalizedFacts = massFacts.modifiedCount + countFacts.modifiedCount;
 
   const nutritionSeedsChanged = await upsertNutritionSeeds();
+  const foodSnapshots = await normalizeFoodNutritionSnapshots();
   const userPlans = await MealPlan.updateMany(
     { inventoryOwnerType: { $ne: 'USER' }, householdId: { $exists: false } },
     { $set: { inventoryOwnerType: 'USER' } },
@@ -229,6 +273,8 @@ async function main() {
     ok: true,
     normalizedFacts,
     nutritionSeedsChanged,
+    foodSnapshotsNormalized: foodSnapshots.normalized,
+    invalidFoodSnapshotsRemoved: foodSnapshots.removed,
     mealPlansUpdated: userPlans.modifiedCount + householdPlans.modifiedCount,
     recipesUpdated,
     nutritionPlansUpdated,

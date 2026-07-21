@@ -63,7 +63,11 @@ export const createFood = async (req: AuthRequest, res: Response) => {
     const item = await createFoodItem(userId, req.body, ownerType as string, householdId as string);
     res.status(201).json({ success: true, data: item });
   } catch (error: any) {
-    const status = error.message === 'Missing required fields' ? 400 : 500;
+    const status = error.message === 'Missing required fields'
+      || error.message === 'Category not found'
+      || error.message.startsWith('Vị trí lưu trữ')
+      ? 400
+      : 500;
     res.status(status).json({ success: false, message: error.message });
   }
 };
@@ -75,7 +79,11 @@ export const updateFood = async (req: AuthRequest, res: Response) => {
     const item = await updateFoodItem(req.params.id as string, userId, req.body, ownerType as string, householdId as string);
     res.json({ success: true, data: item });
   } catch (error: any) {
-    const status = error.message === 'Food item not found' ? 404 : 500;
+    const status = error.message === 'Food item not found'
+      ? 404
+      : error.message === 'Category not found' || error.message.startsWith('Vị trí lưu trữ')
+        ? 400
+        : 500;
     res.status(status).json({ success: false, message: error.message });
   }
 };

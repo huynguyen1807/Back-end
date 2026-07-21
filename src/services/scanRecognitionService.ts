@@ -11,6 +11,7 @@ import {
   getFoodCategoryHintKeys,
   normalizeFoodText,
 } from '../utils/foodCategoryValidation';
+import { validateNutritionSnapshot } from '../utils/nutritionValidation';
 
 type GeminiScanCandidate = {
   foodName?: string;
@@ -47,6 +48,8 @@ type RecognitionInput = {
   userId: string;
   imageBuffer: Buffer;
   mimeType: string;
+  ownerType?: string;
+  householdId?: string;
 };
 
 type GeminiFailureCode =
@@ -161,6 +164,9 @@ Rules:
 - Return multiple candidates only when the image is ambiguous.
 - Do not invent category names outside the provided category list.
 - Keep foodName short and natural, e.g. "Dưa leo", "Nhãn lồng", "Thịt bò", "Trứng gà".
+- nutritionPer100g is for 100 g of the edible portion, never for the total amount visible in the image.
+- Estimate nutrition for the recognized state when visible (raw/cooked, skin-on/skinless) and keep calories consistent with protein, carbs, and fat.
+- Use zero only when a nutrient is genuinely absent; do not copy the same macro values across unrelated foods.
 
 Available categories:
 ${JSON.stringify(compactCategories, null, 2)}
@@ -414,7 +420,13 @@ function defaultExpiryDays(storageType: string) {
   return 3;
 }
 
-async function resolveStorage(userId: string, categoryId?: string, preferredStorageType?: string) {
+type InventoryOwnerContext = Awaited<ReturnType<typeof getInventoryOwnerContext>>;
+
+async function resolveStorage(
+  ownerContext: InventoryOwnerContext,
+  categoryId?: string,
+  preferredStorageType?: string,
+) {
   const rule = categoryId
     ? await StorageRule.findOne({ categoryId, status: 'OFFICIAL' })
       .sort({ priority: -1, estimatedDays: -1 })
@@ -422,7 +434,7 @@ async function resolveStorage(userId: string, categoryId?: string, preferredStor
     : null;
 
   const storageType = normalizeStorageType(rule?.storageType || preferredStorageType);
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const ownerQuery = buildOwnerQuery(ownerContext);
   const location = await StorageLocation.findOne({
     ...ownerQuery,
     storageType,
@@ -455,24 +467,43 @@ async function resolveNutrition(foodName: string, categoryId?: string, aiNutriti
     unit: 'g',
   });
 
-  if (nutrition.matched) {
+  if (nutrition.source === 'NUTRITION_FACT') {
     return {
       calories: nutrition.calories,
       protein: nutrition.macroSummary.protein,
       carbs: nutrition.macroSummary.carbs,
       fat: nutrition.macroSummary.fat,
-      source: 'DATABASE',
+      source: 'NUTRITION_FACT',
+      matched: true,
+    };
+  }
+
+  const validatedAiNutrition = validateNutritionSnapshot({
+    ...aiNutrition,
+    baseQuantity: 100,
+    unit: 'g',
+    source: 'SCAN_AI',
+  });
+  if (validatedAiNutrition.value) {
+    const snapshot = validatedAiNutrition.value;
+    return {
+      calories: snapshot.calories,
+      protein: snapshot.protein,
+      carbs: snapshot.carbs,
+      fat: snapshot.fat,
+      source: 'GEMINI',
       matched: true,
     };
   }
 
   return {
-    calories: Number(aiNutrition?.calories) || 0,
-    protein: Number(aiNutrition?.protein) || 0,
-    carbs: Number(aiNutrition?.carbs) || 0,
-    fat: Number(aiNutrition?.fat) || 0,
-    source: aiNutrition ? 'GEMINI' : 'NONE',
-    matched: false,
+    calories: nutrition.calories,
+    protein: nutrition.macroSummary.protein,
+    carbs: nutrition.macroSummary.carbs,
+    fat: nutrition.macroSummary.fat,
+    source: nutrition.source,
+    matched: nutrition.matched,
+    validationWarning: aiNutrition ? validatedAiNutrition.warning : undefined,
   };
 }
 
@@ -487,6 +518,11 @@ async function hasOfficialNutrition(foodName: string, categoryId?: string) {
 }
 
 export async function recognizeFoodFromImage(input: RecognitionInput) {
+  const ownerContext = await getInventoryOwnerContext(
+    input.userId,
+    input.ownerType,
+    input.householdId,
+  );
   const categories = await FoodCategory.find({ isActive: true })
     .select(CATEGORY_SELECT)
     .sort({ sortOrder: 1, categoryName: 1 })
@@ -512,6 +548,10 @@ export async function recognizeFoodFromImage(input: RecognitionInput) {
       modelAttempts: failure?.modelAttempts || [],
       aiProvider: 'GEMINI',
       modelUsed,
+      inventoryContext: {
+        ownerType: ownerContext.ownerType,
+        householdId: ownerContext.householdId ? String(ownerContext.householdId) : undefined,
+      },
     };
   }
 
@@ -553,13 +593,16 @@ export async function recognizeFoodFromImage(input: RecognitionInput) {
     warnings.push('Độ tin cậy thấp, nên kiểm tra lại trước khi thêm vào inventory.');
   }
 
-  const storage = await resolveStorage(input.userId, best?.categoryId, parsed.preferredStorageType);
+  const storage = await resolveStorage(ownerContext, best?.categoryId, parsed.preferredStorageType);
   const nutrition = await resolveNutrition(best?.foodName || '', best?.categoryId, parsed.nutritionPer100g);
   const nutritionMatched = await hasOfficialNutrition(best?.foodName || '', best?.categoryId);
   const estimatedDays = Math.max(
     0,
     Number(parsed.estimatedExpiryDays) || Number(storage.estimatedDays) || 3,
   );
+  if (nutrition.validationWarning) {
+    warnings.push(`Dinh dưỡng AI không hợp lý nên đã dùng dữ liệu dự phòng: ${nutrition.validationWarning}.`);
+  }
 
   return {
     productName: best?.foodName || parsed.foodName || 'Không xác định',
@@ -588,5 +631,9 @@ export async function recognizeFoodFromImage(input: RecognitionInput) {
     warnings: Array.from(new Set([...(parsed.warnings || []), ...warnings])).filter(Boolean),
     aiProvider: 'GEMINI',
     modelUsed,
+    inventoryContext: {
+      ownerType: ownerContext.ownerType,
+      householdId: ownerContext.householdId ? String(ownerContext.householdId) : undefined,
+    },
   };
 }
