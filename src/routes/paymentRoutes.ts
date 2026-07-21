@@ -1,18 +1,8 @@
 import { Router } from 'express';
-
-import {
-  createPaymentHandler,
-  getPaymentHistoryHandler,
-  sandboxPaymentSuccessHandler
-} from '../controllers/paymentController';
+import { getPaymentHistoryHandler, revenueCatWebhookHandler } from '../controllers/paymentController';
 import { protect } from '../middleware/authMiddleware';
 
 const router = Router();
-
-router.use(protect);
-
-router.post('/create', createPaymentHandler);
-router.post('/sandbox-success/:transactionCode', sandboxPaymentSuccessHandler);
-router.get('/history', getPaymentHistoryHandler);
-
+router.post('/revenuecat/webhook', revenueCatWebhookHandler);
+router.get('/history', protect, getPaymentHistoryHandler);
 export default router;
