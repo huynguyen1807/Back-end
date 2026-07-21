@@ -413,13 +413,33 @@ export async function acceptHouseholdInvitation(userId: string, invitationId: st
   await ensureHouseholdOwnerHasPremium(invitation.householdId.toString());
   await assertUserCanCreateOrJoinFamilyPlan(userId, email, invitationId);
 
-  const member = await HouseholdMember.create({
+  const existingMember = await HouseholdMember.findOne({
     householdId: invitation.householdId,
-    userId,
-    role: 'MEMBER',
-    permission: DEFAULT_MEMBER_PERMISSION,
-    status: 'ACTIVE'
+    userId
   });
+
+  if (existingMember?.status === 'ACTIVE') {
+    throw new Error('User is already a household member');
+  }
+
+  const member = existingMember
+    ? await HouseholdMember.findByIdAndUpdate(
+        existingMember._id,
+        {
+          role: 'MEMBER',
+          permission: DEFAULT_MEMBER_PERMISSION,
+          status: 'ACTIVE',
+          joinedAt: new Date()
+        },
+        { returnDocument: 'after' }
+      )
+    : await HouseholdMember.create({
+        householdId: invitation.householdId,
+        userId,
+        role: 'MEMBER',
+        permission: DEFAULT_MEMBER_PERMISSION,
+        status: 'ACTIVE'
+      });
 
   await mergeUserInventoryIntoHousehold(userId, invitation.householdId.toString());
 

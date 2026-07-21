@@ -50,7 +50,10 @@ function getStatusCode(message: string) {
 }
 
 function handleHouseholdError(res: Response, error: any) {
-  const message = error.message ?? 'Server error';
+  const message =
+    error.code === 11000
+      ? 'User is already a household member'
+      : error.message ?? 'Server error';
   const status = getStatusCode(message);
   res.status(status).json({ success: false, message });
 }
