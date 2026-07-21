@@ -1,28 +1,22 @@
-import nodemailer from 'nodemailer';
+import { getMailConfig, getMailTransporter } from '../config/mail';
 
 export const sendOTP = async (toEmail: string, otpCode: string) => {
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS?.replace(/\s/g, ''), // Xóa dấu cách nếu có
-    },
-  });
+  const transporter = getMailTransporter();
+  const { from } = getMailConfig();
 
-  const mailOptions = {
-    from: `"FreshFriends" <${process.env.SMTP_USER}>`,
+  await transporter.sendMail({
+    from,
     to: toEmail,
-    subject: 'Mã xác nhận Đăng ký tài khoản FreshFriends',
+    subject: 'Mã xác nhận tài khoản FreshFriends',
+    text: `Mã xác nhận FreshFriends của bạn là ${otpCode}. Mã này sẽ hết hạn trong 5 phút.`,
     html: `
-      <div style="font-family: Arial, sans-serif; padding: 20px;">
-        <h2 style="color: #2e7d32;">Chào mừng bạn đến với FreshFriends!</h2>
-        <p>Mã xác nhận (OTP) của bạn để kích hoạt tài khoản là:</p>
+      <div style="font-family: Arial, sans-serif; padding: 20px; color: #1f2937;">
+        <h2 style="color: #166534;">Xác nhận tài khoản FreshFriends</h2>
+        <p>Mã xác nhận (OTP) của bạn là:</p>
         <h1 style="color: #4caf50; letter-spacing: 5px; font-size: 32px;">${otpCode}</h1>
         <p>Mã này sẽ hết hạn trong vòng 5 phút.</p>
-        <p>Nếu bạn không yêu cầu đăng ký, vui lòng bỏ qua email này.</p>
+        <p>Nếu bạn không yêu cầu mã này, vui lòng bỏ qua email.</p>
       </div>
     `,
-  };
-
-  await transporter.sendMail(mailOptions);
+  });
 };

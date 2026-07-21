@@ -11,7 +11,8 @@
     "migrate:nutrition": "tsx src/migrations/normalizeNutritionFacts.ts",
     "migrate:meal-plans": "tsx src/migrations/normalizeMealPlans.ts",
     "test:schedule": "tsx --test src/utils/mealSchedule.test.ts",
-    "test:schedule:db": "tsx src/tests/mealPlanPersistence.integration.ts"
+    "test:schedule:db": "tsx src/tests/mealPlanPersistence.integration.ts",
+    "smtp:verify": "tsx src/scripts/verifySmtp.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
