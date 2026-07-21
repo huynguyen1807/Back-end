@@ -3,6 +3,10 @@ import { MealPlan } from '../models/mealPlan.model';
 import { NutritionFact } from '../models/nutritionFact.model';
 import { NutritionReport } from '../models/nutritionReport.model';
 import { normalizeFoodText } from '../utils/foodCategoryValidation';
+import {
+  defaultNutritionBaseQuantity,
+  resolveNutritionFactor,
+} from '../utils/nutritionUnits';
 
 type MacroSummary = {
   protein: number;
@@ -16,6 +20,16 @@ type IngredientInput = {
   categoryId?: string;
   quantity?: number;
   unit?: string;
+  nutritionSnapshot?: {
+    calories?: number;
+    protein?: number;
+    carbs?: number;
+    fat?: number;
+    baseQuantity?: number;
+    unit?: string;
+    source?: string;
+    confidence?: number;
+  };
 };
 
 const emptyMacro = (): MacroSummary => ({ protein: 0, carbs: 0, fat: 0 });
@@ -42,17 +56,14 @@ export function addDays(value: Date, days: number) {
   return date;
 }
 
-function resolveFactor(quantity: number, ingredientUnit?: string, factUnit?: string) {
-  const qty = Number(quantity) || 0;
-
-  if (!ingredientUnit || !factUnit) return qty;
-  if (ingredientUnit.toLowerCase() === factUnit.toLowerCase()) return qty;
-
-  return qty;
+function normalizeName(value?: string) {
+  return normalizeFoodText(value || '');
 }
 
-function normalizeName(value?: string) {
-  return String(value || '').trim().toLowerCase();
+function containsNormalizedFoodPhrase(source: string, phrase: string) {
+  if (!source || !phrase) return false;
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(source);
 }
 
 export async function findNutritionFactForFood(foodName: string, categoryId?: any) {
@@ -64,7 +75,10 @@ export async function findNutritionFactForFood(foodName: string, categoryId?: an
 
   let fact = await NutritionFact.findOne({
     ...baseQuery,
-    foodName: new RegExp(`^${escapeRegex(name)}$`, 'i')
+    $or: [
+      { foodName: new RegExp(`^${escapeRegex(name)}$`, 'i') },
+      { aliases: new RegExp(`^${escapeRegex(name)}$`, 'i') },
+    ]
   }).sort({ source: 1 });
 
   if (!fact) {
@@ -79,28 +93,96 @@ export async function findNutritionFactForFood(foodName: string, categoryId?: an
     const normalizedFoodName = normalizeName(name);
     fact = candidates.find((candidate) => {
       const normalizedFactName = normalizeName(candidate.foodName);
-      return (
-        normalizedFoodName.includes(normalizedFactName) ||
-        normalizedFactName.includes(normalizedFoodName)
+      const candidateNames = [normalizedFactName, ...(candidate.aliases || []).map((alias: string) => normalizeName(alias))];
+      return candidateNames.some((candidateName: string) =>
+        candidateName.length >= 3 && (
+          normalizedFoodName === candidateName ||
+          containsNormalizedFoodPhrase(normalizedFoodName, candidateName) ||
+          containsNormalizedFoodPhrase(candidateName, normalizedFoodName)
+        )
       );
     }) || null;
   }
 
-  if (!fact && categoryId) {
-    fact = await NutritionFact.findOne({ categoryId, status: 'OFFICIAL' }).sort({
-      source: 1,
-      foodName: 1
-    });
-  }
-
   if (!fact) {
     fact = await NutritionFact.findOne({
-      foodName: new RegExp(`^${escapeRegex(name)}$`, 'i'),
+      $or: [
+        { foodName: new RegExp(`^${escapeRegex(name)}$`, 'i') },
+        { aliases: new RegExp(`^${escapeRegex(name)}$`, 'i') },
+      ],
       status: 'OFFICIAL'
     }).sort({ source: 1 });
   }
 
+  if (!fact) {
+    const globalCandidates = await NutritionFact.find({ status: 'OFFICIAL' })
+      .sort({ source: 1, foodName: 1 })
+      .limit(160);
+    const normalizedFoodName = normalizeName(name);
+    fact = globalCandidates.find((candidate) => {
+      const normalizedFactName = normalizeName(candidate.foodName);
+      const candidateNames = [normalizedFactName, ...(candidate.aliases || []).map((alias: string) => normalizeName(alias))];
+      return candidateNames.some((candidateName: string) => candidateName.length >= 3 && (
+        normalizedFoodName === candidateName ||
+        containsNormalizedFoodPhrase(normalizedFoodName, candidateName) ||
+        containsNormalizedFoodPhrase(candidateName, normalizedFoodName)
+      ));
+    }) || null;
+  }
+
   return fact;
+}
+
+type CategoryBaseline = {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  unit: 'g' | 'ml';
+};
+
+const CATEGORY_BASELINES: Array<{ keys: string[]; nutrition: CategoryBaseline }> = [
+  { keys: ['fruit', 'trai cay'], nutrition: { calories: 60, protein: 0.7, carbs: 15, fat: 0.3, unit: 'g' } },
+  { keys: ['vegetable', 'rau cu'], nutrition: { calories: 35, protein: 1.8, carbs: 7, fat: 0.3, unit: 'g' } },
+  { keys: ['meat', 'thit'], nutrition: { calories: 200, protein: 26, carbs: 0, fat: 10, unit: 'g' } },
+  { keys: ['fish', 'ca'], nutrition: { calories: 180, protein: 22, carbs: 0, fat: 10, unit: 'g' } },
+  { keys: ['seafood', 'hai san'], nutrition: { calories: 110, protein: 20, carbs: 2, fat: 2, unit: 'g' } },
+  { keys: ['egg', 'trung'], nutrition: { calories: 143, protein: 13, carbs: 0.7, fat: 9.5, unit: 'g' } },
+  { keys: ['dairy', 'sua'], nutrition: { calories: 65, protein: 3.4, carbs: 5, fat: 3.5, unit: 'ml' } },
+  { keys: ['dry food', 'do kho', 'luong thuc'], nutrition: { calories: 350, protein: 10, carbs: 70, fat: 4, unit: 'g' } },
+  { keys: ['cooked food', 'thuc an chin', 'mon an'], nutrition: { calories: 150, protein: 8, carbs: 18, fat: 5, unit: 'g' } },
+  { keys: ['frozen food', 'dong lanh'], nutrition: { calories: 150, protein: 12, carbs: 10, fat: 7, unit: 'g' } },
+];
+
+async function resolveCategoryBaseline(categoryId?: string) {
+  if (!categoryId) return null;
+  const category = await FoodCategory.findById(categoryId)
+    .select('categoryName displayName aliases')
+    .lean();
+  if (!category) return null;
+
+  const categoryTerms = [category.categoryName, category.displayName, ...(category.aliases || [])]
+    .map((value) => normalizeName(value))
+    .filter(Boolean);
+  return CATEGORY_BASELINES.find((baseline) =>
+    baseline.keys.some((key) => categoryTerms.some((term) => term === key || term.includes(key)))
+  )?.nutrition || null;
+}
+
+function calculateFromSource(
+  quantity: number,
+  inputUnit: string | undefined,
+  source: { calories?: number; protein?: number; carbs?: number; fat?: number; unit?: string; baseQuantity?: number },
+) {
+  const factor = resolveNutritionFactor(quantity, inputUnit, source.unit, source.baseQuantity);
+  return {
+    calories: round(factor * (Number(source.calories) || 0)),
+    macroSummary: {
+      protein: round(factor * (Number(source.protein) || 0)),
+      carbs: round(factor * (Number(source.carbs) || 0)),
+      fat: round(factor * (Number(source.fat) || 0)),
+    },
+  };
 }
 
 export async function resolveNutritionForFood(input: IngredientInput) {
@@ -112,36 +194,76 @@ export async function resolveNutritionForFood(input: IngredientInput) {
       calories: 0,
       macroSummary: emptyMacro(),
       nutritionFactId: undefined,
-      matched: false
+      matched: false,
+      estimated: false,
+      source: 'UNAVAILABLE',
+      unit: undefined,
+      baseQuantity: undefined,
     };
   }
 
   const fact = await findNutritionFactForFood(foodName, input.categoryId);
-  if (!fact) {
+  if (fact) {
+    const totals = calculateFromSource(quantity, input.unit, {
+      calories: fact.caloriesPerUnit,
+      protein: fact.protein,
+      carbs: fact.carbs,
+      fat: fact.fat,
+      unit: fact.unit,
+      baseQuantity: fact.baseQuantity || defaultNutritionBaseQuantity(fact.unit),
+    });
+
     return {
-      calories: 0,
-      macroSummary: emptyMacro(),
-      nutritionFactId: undefined,
-      matched: false
+      ...totals,
+      nutritionFactId: fact._id,
+      matched: true,
+      estimated: false,
+      source: 'NUTRITION_FACT',
+      unit: fact.unit,
+      baseQuantity: fact.baseQuantity || defaultNutritionBaseQuantity(fact.unit),
     };
   }
 
-  const factor = resolveFactor(quantity, input.unit, fact.unit);
-  const calories = factor * (Number(fact.caloriesPerUnit) || 0);
-  const protein = factor * (Number(fact.protein) || 0);
-  const carbs = factor * (Number(fact.carbs) || 0);
-  const fat = factor * (Number(fact.fat) || 0);
+  if (input.nutritionSnapshot && Number(input.nutritionSnapshot.calories) > 0) {
+    const snapshot = input.nutritionSnapshot;
+    const totals = calculateFromSource(quantity, input.unit, snapshot);
+    return {
+      ...totals,
+      nutritionFactId: undefined,
+      matched: true,
+      estimated: snapshot.source === 'CATEGORY_ESTIMATE',
+      source: snapshot.source || 'SCAN_AI',
+      unit: snapshot.unit,
+      baseQuantity: snapshot.baseQuantity,
+    };
+  }
+
+  const baseline = await resolveCategoryBaseline(input.categoryId);
+  if (baseline) {
+    const totals = calculateFromSource(quantity, input.unit, {
+      ...baseline,
+      baseQuantity: 100,
+    });
+    return {
+      ...totals,
+      nutritionFactId: undefined,
+      matched: true,
+      estimated: true,
+      source: 'CATEGORY_ESTIMATE',
+      unit: baseline.unit,
+      baseQuantity: 100,
+    };
+  }
 
   return {
-    calories: round(calories),
-    macroSummary: {
-      protein: round(protein),
-      carbs: round(carbs),
-      fat: round(fat)
-    },
-    nutritionFactId: fact._id,
-    matched: true,
-    unit: fact.unit
+    calories: 0,
+    macroSummary: emptyMacro(),
+    nutritionFactId: undefined,
+    matched: false,
+    estimated: false,
+    source: 'UNAVAILABLE',
+    unit: undefined,
+    baseQuantity: undefined,
   };
 }
 
@@ -266,10 +388,19 @@ export async function generateNutritionReport(userId: string, data: any = {}) {
   const defaultDays = periodType === 'MONTH' ? 30 : 7;
   const endDate = data.endDate ? endOfDay(data.endDate) : endOfDay(addDays(startDate, defaultDays - 1));
 
-  const plans = await MealPlan.find({
+  const planFilter: any = {
     userId,
     planDate: { $gte: startDate, $lte: endDate }
-  }).sort({ planDate: 1 });
+  };
+  if (data.ownerType === 'HOUSEHOLD' && data.householdId) {
+    planFilter.householdId = data.householdId;
+  } else if (data.ownerType === 'USER') {
+    planFilter.$or = [
+      { inventoryOwnerType: 'USER' },
+      { inventoryOwnerType: { $exists: false }, householdId: { $exists: false } },
+    ];
+  }
+  const plans = await MealPlan.find(planFilter).sort({ planDate: 1 });
 
   const dailyMap = new Map<string, any>();
   for (const plan of plans) {
@@ -315,7 +446,7 @@ export async function generateNutritionReport(userId: string, data: any = {}) {
 
   const reportData = {
     userId,
-    householdId: data.householdId,
+    householdId: data.ownerType === 'HOUSEHOLD' ? data.householdId : undefined,
     periodType,
     startDate,
     endDate,
@@ -329,7 +460,14 @@ export async function generateNutritionReport(userId: string, data: any = {}) {
   };
 
   return NutritionReport.findOneAndUpdate(
-    { userId, periodType, startDate },
+    {
+      userId,
+      periodType,
+      startDate,
+      ...(data.ownerType === 'HOUSEHOLD' && data.householdId
+        ? { householdId: data.householdId }
+        : { householdId: { $exists: false } }),
+    },
     reportData,
     { returnDocument: 'after', upsert: true }
   );

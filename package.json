@@ -7,7 +7,8 @@
     "start": "node dist/server.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "seed:food-categories": "tsx src/seeders/foodCategoryMetadata.ts"
+    "seed:food-categories": "tsx src/seeders/foodCategoryMetadata.ts",
+    "migrate:nutrition": "tsx src/migrations/normalizeNutritionFacts.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

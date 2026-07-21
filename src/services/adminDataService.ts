@@ -12,6 +12,7 @@ import {
 } from './recipeService';
 import { listNutritionFacts, resolveCategory } from './nutritionService';
 import { normalizeFoodText } from '../utils/foodCategoryValidation';
+import { defaultNutritionBaseQuantity } from '../utils/nutritionUnits';
 
 async function logAdminAction(
   adminId: string,
@@ -73,9 +74,13 @@ export async function createAdminNutritionFact(adminId: string, data: any) {
 
   const created = await NutritionFact.create({
     foodName: data.foodName.trim(),
+    aliases: normalizeStringList(data.aliases) ?? [],
     categoryId,
     caloriesPerUnit: Number(data.caloriesPerUnit),
     unit: data.unit,
+    baseQuantity: Number(data.baseQuantity) > 0
+      ? Number(data.baseQuantity)
+      : defaultNutritionBaseQuantity(data.unit),
     protein: Number(data.protein) || 0,
     carbs: Number(data.carbs) || 0,
     fat: Number(data.fat) || 0,
@@ -94,7 +99,7 @@ export async function updateAdminNutritionFact(adminId: string, factId: string, 
   if (!existing) throw new Error('Nutrition fact not found');
 
   const updateData: any = {};
-  const fields = ['foodName', 'caloriesPerUnit', 'unit', 'protein', 'carbs', 'fat', 'source', 'status'];
+  const fields = ['foodName', 'caloriesPerUnit', 'baseQuantity', 'unit', 'protein', 'carbs', 'fat', 'source', 'status'];
 
   for (const field of fields) {
     if (data[field] !== undefined) updateData[field] = data[field];
@@ -103,9 +108,14 @@ export async function updateAdminNutritionFact(adminId: string, factId: string, 
   if (data.categoryId || data.categoryName) {
     updateData.categoryId = await resolveCategory(data.categoryId, data.categoryName, adminId);
   }
+  if (data.aliases !== undefined) updateData.aliases = normalizeStringList(data.aliases);
 
   if (updateData.foodName) updateData.foodName = updateData.foodName.trim();
   if (updateData.caloriesPerUnit !== undefined) updateData.caloriesPerUnit = Number(updateData.caloriesPerUnit);
+  if (updateData.baseQuantity !== undefined) {
+    updateData.baseQuantity = Number(updateData.baseQuantity);
+    if (!(updateData.baseQuantity > 0)) throw new Error('baseQuantity must be greater than 0');
+  }
   if (updateData.protein !== undefined) updateData.protein = Number(updateData.protein) || 0;
   if (updateData.carbs !== undefined) updateData.carbs = Number(updateData.carbs) || 0;
   if (updateData.fat !== undefined) updateData.fat = Number(updateData.fat) || 0;

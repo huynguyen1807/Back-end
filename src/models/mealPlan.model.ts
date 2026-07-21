@@ -46,6 +46,7 @@ const mealSchema = new Schema(
 const mealPlanSchema = new Schema(
   {
     userId: { type: objectId, ref: 'User', required: true },
+    inventoryOwnerType: { type: String, enum: ['USER', 'HOUSEHOLD'], default: 'USER' },
     householdId: { type: objectId, ref: 'Household' },
     planDate: { type: Date, required: true },
     goal: String,

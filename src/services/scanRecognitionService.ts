@@ -157,6 +157,7 @@ Rules:
 - Do not guess if the image is not food or too blurry. Set isFood=false and confidence <= 0.25.
 - Map the food to one of the existing categories by categoryName/displayName/aliases/examples.
 - Use grocery/culinary classification, not botanical taxonomy.
+- Do not confuse Vietnamese words with accents: "cà rốt", "cà chua" are vegetables, not fish ("cá").
 - Return multiple candidates only when the image is ambiguous.
 - Do not invent category names outside the provided category list.
 - Keep foodName short and natural, e.g. "Dưa leo", "Nhãn lồng", "Thịt bò", "Trứng gà".
@@ -181,7 +182,7 @@ Return only raw JSON:
     }
   ],
   "visualEvidence": ["dấu hiệu nhìn thấy trong ảnh"],
-  "estimatedQuantity": { "quantity": 1, "unit": "kg|g|item|serving" },
+  "estimatedQuantity": { "quantity": 1, "unit": "kg|g|ml|l|quả|cái" },
   "preferredStorageType": "REFRIGERATOR|OUTSIDE|FREEZER|PANTRY|KITCHEN_CABINET",
   "estimatedExpiryDays": 3,
   "nutritionPer100g": { "calories": 0, "protein": 0, "carbs": 0, "fat": 0 },
@@ -343,6 +344,21 @@ function scoreCategoryForFoodName(foodName: string, category: FoodCategoryLike) 
   }, 0);
 }
 
+function categoryMatchesFoodHint(foodName: string | undefined, category: FoodCategoryLike) {
+  const hintKeys = getFoodCategoryHintKeys(foodName || '');
+  if (!hintKeys.length) return true;
+
+  const categoryKeys = [
+    category.categoryName,
+    category.displayName,
+    ...(category.aliases || []),
+    ...(category.keywords || []),
+    ...(category.foodExamples || []),
+  ].map((value) => normalizeFoodText(value || ''));
+
+  return hintKeys.some((hintKey) => categoryKeys.includes(hintKey));
+}
+
 function findBestCategoryByFoodName(foodName: string | undefined, categories: FoodCategoryLike[]) {
   if (!foodName?.trim()) return undefined;
   const scored = categories
@@ -361,9 +377,17 @@ function mapCandidateToCategory(candidate: GeminiScanCandidate, categories: Food
   if (byFoodName) return byFoodName;
 
   const direct = findCategoryByName(candidate.categoryName, categories);
-  if (direct) return direct;
+  if (direct && categoryMatchesFoodHint(candidate.foodName, direct)) return direct;
 
   return undefined;
+}
+
+function normalizeEstimatedQuantityUnit(unit?: string) {
+  const normalized = normalizeFoodText(unit || '');
+  if (['kg', 'g', 'ml', 'l'].includes(normalized)) return normalized;
+  if (['qua', 'trai'].includes(normalized)) return 'quả';
+  if (['cai', 'hop', 'goi', 'item', 'piece', 'pieces'].includes(normalized)) return 'cái';
+  return 'kg';
 }
 
 function normalizeStorageType(value?: string) {
@@ -549,7 +573,7 @@ export async function recognizeFoodFromImage(input: RecognitionInput) {
     visualEvidence: Array.isArray(parsed.visualEvidence) ? parsed.visualEvidence.slice(0, 5) : [],
     estimatedQuantity: {
       quantity: Number(parsed.estimatedQuantity?.quantity) || 1,
-      unit: parsed.estimatedQuantity?.unit || 'kg',
+      unit: normalizeEstimatedQuantityUnit(parsed.estimatedQuantity?.unit),
     },
     storageSuggestion: storage,
     expiryEstimate: {

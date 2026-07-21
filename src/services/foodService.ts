@@ -8,6 +8,7 @@ import { FoodCategoryLike, FoodCategoryValidationResult } from '../utils/foodCat
 import { classifyFoodCategory } from './foodCategoryClassifierService';
 import { Household } from '../models/household.model';
 import { getUserCurrentSubscription } from './subscriptionService';
+import { defaultNutritionBaseQuantity, normalizeNutritionUnit } from '../utils/nutritionUnits';
 
 const CATEGORY_SELECT = 'categoryName displayName description aliases keywords foodExamples sortOrder';
 
@@ -85,6 +86,36 @@ function neutralCategoryValidation(): FoodCategoryValidationResult {
     isMismatch: false,
     confidence: 'NONE',
     matchedCategoryIds: [],
+  };
+}
+
+function sanitizeNutritionSnapshot(value: any, fallbackUnit?: string) {
+  if (!value || typeof value !== 'object') return undefined;
+
+  const calories = Math.max(0, Number(value.calories) || 0);
+  const protein = Math.max(0, Number(value.protein) || 0);
+  const carbs = Math.max(0, Number(value.carbs) || 0);
+  const fat = Math.max(0, Number(value.fat) || 0);
+  if (!calories && !protein && !carbs && !fat) return undefined;
+
+  const unit = String(value.unit || fallbackUnit || 'g').trim();
+  const normalizedUnit = normalizeNutritionUnit(unit);
+  const baseQuantity = Number(value.baseQuantity) > 0
+    ? Number(value.baseQuantity)
+    : defaultNutritionBaseQuantity(normalizedUnit);
+
+  return {
+    calories,
+    protein,
+    carbs,
+    fat,
+    baseQuantity,
+    unit,
+    source: ['SCAN_AI', 'ADMIN', 'CATEGORY_ESTIMATE'].includes(value.source)
+      ? value.source
+      : 'SCAN_AI',
+    confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)),
+    capturedAt: value.capturedAt ? new Date(value.capturedAt) : new Date(),
   };
 }
 
@@ -182,7 +213,8 @@ async function enrichFoodNutrition(
     foodName: raw.foodName,
     categoryId,
     quantity: raw.quantity,
-    unit: raw.unit
+    unit: raw.unit,
+    nutritionSnapshot: raw.nutritionSnapshot,
   });
 
   return {
@@ -194,7 +226,10 @@ async function enrichFoodNutrition(
       macroSummary: nutrition.macroSummary,
       matched: nutrition.matched,
       nutritionFactId: nutrition.nutritionFactId,
-      unit: nutrition.unit
+      unit: nutrition.unit,
+      baseQuantity: nutrition.baseQuantity,
+      source: nutrition.source,
+      estimated: nutrition.estimated,
     },
     categoryValidation: resolvedCategoryValidation,
     categoryWarning: resolvedCategoryValidation.warning,
@@ -252,6 +287,7 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
     expiryDate,
     quantity,
     unit,
+    nutritionSnapshot,
   } = data;
 
   // Validate required fields
@@ -313,6 +349,7 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
     expiryDate: expiry,
     quantity,
     unit,
+    nutritionSnapshot: sanitizeNutritionSnapshot(nutritionSnapshot, unit),
     status: applyCategoryValidationStatus(status, categoryValidation),
     freshnessScore,
     createdBy: userId,
@@ -340,6 +377,12 @@ export async function updateFoodItem(foodId: string, userId: string, data: any, 
   const updateData: any = {};
   for (const field of allowedFields) {
     if (data[field] !== undefined) updateData[field] = data[field];
+  }
+  if (data.nutritionSnapshot !== undefined) {
+    updateData.nutritionSnapshot = sanitizeNutritionSnapshot(
+      data.nutritionSnapshot,
+      data.unit ?? item.unit,
+    );
   }
 
   if (updateData.storageLocationId) {

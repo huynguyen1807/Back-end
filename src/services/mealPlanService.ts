@@ -181,6 +181,7 @@ async function resolveUsedFoods(meal: any, ownerQuery: any = {}): Promise<any[]>
       categoryId: getCategoryId(food.categoryId),
       quantity: quantityUsed,
       unit,
+      nutritionSnapshot: food.nutritionSnapshot,
     });
 
     resolved.push({
@@ -371,7 +372,8 @@ async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any =
 
   return {
     userId,
-    householdId: data.householdId,
+    inventoryOwnerType: data.ownerType === 'HOUSEHOLD' ? 'HOUSEHOLD' : 'USER',
+    householdId: data.ownerType === 'HOUSEHOLD' ? data.householdId : undefined,
     planDate: startOfDay(data.planDate),
     goal: data.goal,
     totalCalories: totals.totalCalories,
@@ -382,8 +384,51 @@ async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any =
   };
 }
 
+function getStoredPlanOwnerQuery(plan: any) {
+  return plan.inventoryOwnerType === 'HOUSEHOLD' && plan.householdId
+    ? { ownerType: 'HOUSEHOLD', householdId: plan.householdId }
+    : { ownerType: 'USER', userId: plan.userId };
+}
+
+async function backfillMealPlanNutrition(plan: any) {
+  const ownerQuery = getStoredPlanOwnerQuery(plan);
+  const resolvedMeals = await Promise.all(
+    (plan.meals || []).map((meal: any) => resolveMealPayload(meal.toObject?.() || meal, ownerQuery)),
+  );
+  const totals = calculateMealTotals(resolvedMeals);
+  const needsUpdate =
+    Number(plan.totalCalories) !== totals.totalCalories ||
+    !hasMacroValue(plan.macroSummary) ||
+    resolvedMeals.some((meal: any, index: number) =>
+      Number(meal.calories) !== Number(plan.meals?.[index]?.calories) ||
+      (hasMacroValue(meal.macroSummary) && !hasMacroValue(plan.meals?.[index]?.macroSummary))
+    );
+
+  if (needsUpdate) {
+    plan.meals = resolvedMeals;
+    plan.totalCalories = totals.totalCalories;
+    plan.macroSummary = totals.macroSummary;
+    await plan.save();
+  }
+
+  return plan;
+}
+
 export async function listMealPlans(userId: string, query: any = {}) {
   const filter: any = { userId };
+
+  if (query.ownerType || query.householdId) {
+    const context = await getInventoryOwnerContext(userId, query.ownerType, query.householdId);
+    if (context.ownerType === 'HOUSEHOLD') {
+      filter.householdId = context.householdId;
+      filter.inventoryOwnerType = { $in: ['HOUSEHOLD', null] };
+    } else {
+      filter.$or = [
+        { inventoryOwnerType: 'USER' },
+        { inventoryOwnerType: { $exists: false }, householdId: { $exists: false } },
+      ];
+    }
+  }
 
   if (query.date) {
     filter.planDate = { $gte: startOfDay(query.date), $lte: endOfDay(query.date) };
@@ -393,10 +438,12 @@ export async function listMealPlans(userId: string, query: any = {}) {
     if (query.endDate) filter.planDate.$lte = endOfDay(query.endDate);
   }
 
-  return MealPlan.find(filter)
-    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary')
-    .populate('meals.usedFoods.foodItemId', 'foodName quantity unit status')
-    .sort({ planDate: 1, updatedAt: -1 });
+  const plans = await MealPlan.find(filter).sort({ planDate: 1, updatedAt: -1 });
+  await Promise.all(plans.map(backfillMealPlanNutrition));
+  return MealPlan.populate(plans, [
+    { path: 'meals.recipeId', select: 'recipeName imageUrl calories macroSummary' },
+    { path: 'meals.usedFoods.foodItemId', select: 'foodName quantity unit status' },
+  ]);
 }
 
 export async function getMealPlanById(planId: string, userId: string) {
@@ -409,8 +456,13 @@ export async function getMealPlanById(planId: string, userId: string) {
 }
 
 export async function createMealPlan(userId: string, data: any) {
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
-  const payload = await buildMealPlanPayload(userId, data, ownerQuery);
+  const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  const ownerQuery = buildOwnerQuery(context);
+  const payload = await buildMealPlanPayload(userId, {
+    ...data,
+    ownerType: context.ownerType,
+    householdId: context.householdId,
+  }, ownerQuery);
   payload.meals = await applyMealInventoryTransitions([], payload.meals, ownerQuery);
   return MealPlan.create(payload);
 }
@@ -419,10 +471,17 @@ export async function updateMealPlan(planId: string, userId: string, data: any) 
   const existing = await MealPlan.findOne({ _id: planId, userId });
   if (!existing) throw new Error('Meal plan not found');
 
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const context = await getInventoryOwnerContext(
+    userId,
+    existing.inventoryOwnerType || (existing.householdId ? 'HOUSEHOLD' : 'USER'),
+    existing.householdId?.toString(),
+  );
+  const ownerQuery = buildOwnerQuery(context);
   const payload = await buildMealPlanPayload(userId, {
     ...existing.toObject(),
     ...data,
+    ownerType: context.ownerType,
+    householdId: context.householdId,
     planDate: data.planDate || existing.planDate,
     meals: data.meals || existing.meals
   }, ownerQuery);
@@ -441,7 +500,12 @@ export async function deleteMealPlan(planId: string, userId: string) {
   const existing = await MealPlan.findOne({ _id: planId, userId });
   if (!existing) throw new Error('Meal plan not found');
 
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const context = await getInventoryOwnerContext(
+    userId,
+    existing.inventoryOwnerType || (existing.householdId ? 'HOUSEHOLD' : 'USER'),
+    existing.householdId?.toString(),
+  );
+  const ownerQuery = buildOwnerQuery(context);
   await applyMealInventoryTransitions(existing.meals || [], [], ownerQuery);
   await MealPlan.deleteOne({ _id: planId, userId });
   return { message: 'Meal plan deleted successfully' };
@@ -470,7 +534,7 @@ function expiryPriority(expiryDate: Date) {
 }
 
 function normalize(value: string) {
-  return value.trim().toLowerCase();
+  return normalizeFoodText(value || '');
 }
 
 function hasMacroValue(macroSummary: any) {
@@ -542,21 +606,61 @@ function recipeInventoryScore(recipe: any, foods: any[]) {
   };
 }
 
+function hasFoodTerm(text: string, terms: string[]) {
+  return terms.some((term) => {
+    const normalizedTerm = normalizeFoodText(term);
+    if (!normalizedTerm) return false;
+    const escaped = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(text);
+  });
+}
+
+function isProteinFoodText(text: string) {
+  return hasFoodTerm(text, [
+    'thịt',
+    'thịt bò',
+    'thịt gà',
+    'thịt heo',
+    'thịt lợn',
+    'gà',
+    'bò',
+    'heo',
+    'lợn',
+    'tôm',
+    'trứng',
+    'egg',
+    'chicken',
+    'beef',
+    'pork',
+    'fish',
+    'shrimp',
+    'tofu',
+    'đậu hũ',
+    'cá hồi',
+    'cá thu',
+    'cá basa',
+    'cá ngừ',
+    'cá lóc',
+    'cá rô',
+    'cá chép'
+  ]);
+}
+
 function getFoodGroup(food: InventoryPriorityFood) {
   const text = normalize(`${food.foodName} ${food.categoryName || ''}`);
-  if (/gà|bo|bò|heo|lợn|thịt|cá|tôm|trứng|egg|chicken|beef|pork|fish|shrimp|tofu|đậu/.test(text)) {
-    return 'protein';
-  }
-  if (/cơm|gạo|bún|mì|noodle|rice|pasta|khoai|bread|bánh mì|yến mạch|oat/.test(text)) {
-    return 'carb';
-  }
-  if (/rau|cải|xà lách|cà rốt|cà chua|dưa leo|bí|nấm|vegetable|salad|lettuce|tomato|carrot|mushroom/.test(text)) {
+  if (hasFoodTerm(text, ['rau', 'cải', 'xà lách', 'cà rốt', 'cà chua', 'dưa leo', 'dưa chuột', 'bí', 'nấm', 'vegetable', 'salad', 'lettuce', 'tomato', 'carrot', 'mushroom'])) {
     return 'vegetable';
   }
-  if (/chuối|táo|cam|dâu|xoài|fruit|banana|apple|orange|berry|mango/.test(text)) {
+  if (hasFoodTerm(text, ['chuối', 'táo', 'cam', 'dâu', 'xoài', 'nhãn', 'dưa hấu', 'fruit', 'banana', 'apple', 'orange', 'berry', 'mango'])) {
     return 'fruit';
   }
-  if (/sữa|yogurt|yaourt|phô mai|milk|cheese/.test(text)) {
+  if (isProteinFoodText(text)) {
+    return 'protein';
+  }
+  if (hasFoodTerm(text, ['cơm', 'gạo', 'bún', 'mì', 'noodle', 'rice', 'pasta', 'khoai', 'bread', 'bánh mì', 'yến mạch', 'oat'])) {
+    return 'carb';
+  }
+  if (hasFoodTerm(text, ['sữa', 'yogurt', 'yaourt', 'phô mai', 'milk', 'cheese'])) {
     return 'dairy';
   }
   return 'other';
@@ -663,7 +767,7 @@ function normalizeRecipeQuantity(quantity: number, unit: string, ingredientName 
   if (normalizedUnit === 'kg') return Math.max(0.05, Math.round(value * 20) / 20);
   if (normalizedUnit === 'g') {
     const base = value < 25 ? 25 : Math.round(value / 25) * 25;
-    return Math.min(Math.max(base, 25), /thit|bo|ga|heo|ca|tom|protein/.test(normalizedName) ? 250 : 300);
+    return Math.min(Math.max(base, 25), isProteinFoodText(normalizedName) ? 250 : 300);
   }
   if (normalizedUnit === 'l') return Math.max(0.05, Math.round(value * 20) / 20);
   if (normalizedUnit === 'ml') {
@@ -692,7 +796,7 @@ function estimateIngredientNutrition(ingredient: any) {
     grams = rawQuantity * 100;
   }
 
-  const per100 = /thit|bo|ga|heo|ca|tom|trung|egg|fish|chicken|beef|pork/.test(name)
+  const per100 = isProteinFoodText(name)
     ? { calories: 170, protein: 21, carbs: 0, fat: 8 }
     : /gao|com|bun|mi|pho|khoai|bread|rice|noodle|oat/.test(name)
       ? { calories: 130, protein: 3, carbs: 28, fat: 1 }
@@ -797,6 +901,18 @@ function allocateCaloriesToMealTypes(
     max: slot.max,
     target: targets[index]
   }));
+}
+
+function randomizeRecipeAllocation(allocation: MealCalorieAllocation): MealCalorieAllocation {
+  const minimum = Math.max(1, Math.ceil(allocation.min));
+  const maximum = Number.isFinite(allocation.max)
+    ? Math.max(minimum, Math.floor(allocation.max))
+    : Math.max(minimum, Math.round(allocation.target * 1.15));
+
+  return {
+    ...allocation,
+    target: randomInt(minimum, maximum)
+  };
 }
 
 function findAllocationForCalories(
@@ -1582,9 +1698,9 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
       ? preference.defaultMealTypes
       : ['BREAKFAST', 'LUNCH', 'DINNER'];
 
+  const inventoryContext = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
   const foods = await FoodItem.find({
-    userId,
-    ownerType: 'USER',
+    ...buildOwnerQuery(inventoryContext),
     isDeleted: false,
     isConsumed: false,
     quantity: { $gt: 0 },
@@ -1599,7 +1715,8 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
         foodName: food.foodName,
         categoryId: getCategoryId(food.categoryId),
         quantity: food.quantity,
-        unit: food.unit
+        unit: food.unit,
+        nutritionSnapshot: food.nutritionSnapshot,
       });
 
       return {
@@ -1631,6 +1748,10 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     calorieMax,
     calorieTarget
   );
+  const generatedCalorieTarget = calorieAllocations.reduce(
+    (sum, allocation) => sum + (Number(allocation.target) || 0),
+    0
+  );
   const recipes = await Recipe.find({
     isActive: true,
     $or: [
@@ -1646,7 +1767,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     preference,
     calorieMin,
     calorieMax,
-    calorieTarget,
+    calorieTarget: generatedCalorieTarget,
     bmiProfile: data.bmiProfile,
     existingRecipes: recipeReferences,
     weather: data.weather
@@ -1654,7 +1775,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
   const fallbackDrafts = buildFallbackRecipeDrafts(
     priorityFoods,
     calorieAllocations,
-    calorieTarget,
+    generatedCalorieTarget,
     data.weather,
     recipeReferences
   );
@@ -1676,14 +1797,15 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
 
     for (const draft of mealDrafts) {
       const draftKey = `${normalize(draft.recipeName || '')}:${buildIngredientSignature(draft.ingredients || [])}:${buildStepSignature(draft.steps || draft.cookingSteps || [])}`;
+      const recipeAllocation = randomizeRecipeAllocation(allocation);
       const recommendation = await buildGeneratedRecipeFromDraft(
         userId,
         { ...draft, mealType: allocation.mealType },
-        allocation,
+        recipeAllocation,
         priorityFoods,
         {
           ...data,
-          calorieTarget
+          calorieTarget: generatedCalorieTarget
         }
       );
       const recipeCalories = Number(recommendation.recipe?.calories) || 0;
@@ -1762,7 +1884,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     inventoryPriority: priorityFoods,
     recommendations: recommendations.slice(0, 12),
     planDate,
-    calorieTarget,
+    calorieTarget: generatedCalorieTarget,
     calorieRange: { min: calorieMin, max: calorieMax },
     mealCalorieAllocations: calorieAllocations,
     generatedCaloriesTotal: generatedRecommendations

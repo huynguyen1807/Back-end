@@ -17,6 +17,17 @@ const foodItemSchema = new Schema(
     expiryDate: { type: Date, required: true },
     quantity: { type: Number, required: true, min: 0 },
     unit: { type: String, required: true },
+    nutritionSnapshot: {
+      calories: { type: Number, min: 0 },
+      protein: { type: Number, min: 0 },
+      carbs: { type: Number, min: 0 },
+      fat: { type: Number, min: 0 },
+      baseQuantity: { type: Number, min: 0.01 },
+      unit: String,
+      source: { type: String, enum: ['SCAN_AI', 'ADMIN', 'CATEGORY_ESTIMATE'] },
+      confidence: { type: Number, min: 0, max: 1 },
+      capturedAt: Date
+    },
     status: {
       type: String,
       enum: ['SAFE', 'NEAR_EXPIRY', 'EXPIRED', 'NEED_CHECK'],
