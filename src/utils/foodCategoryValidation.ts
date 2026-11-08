@@ -27,6 +27,23 @@ type ScoredCategory = {
   matchedTerms: string[];
 };
 
+const AMBIGUOUS_SINGLE_TERMS = new Set(['ca']);
+
+const CATEGORY_HINTS: Array<{ terms: string[]; categoryKeys: string[] }> = [
+  {
+    terms: ['ca rot', 'carrot'],
+    categoryKeys: ['vegetable', 'rau cu', 'cu qua'],
+  },
+  {
+    terms: ['dua leo', 'dua chuot', 'cucumber', 'ca chua', 'tomato'],
+    categoryKeys: ['vegetable', 'rau cu', 'cu qua'],
+  },
+  {
+    terms: ['ca hoi', 'ca thu', 'ca basa', 'ca ngu', 'ca loc', 'ca ro', 'fish'],
+    categoryKeys: ['fish', 'ca'],
+  },
+];
+
 export function normalizeFoodText(value?: string) {
   return (value ?? '')
     .normalize('NFD')
@@ -82,9 +99,34 @@ function hasTerm(foodName: string, term: string) {
   const source = normalizeFoodText(foodName);
   const normalizedTerm = normalizeFoodText(term);
   if (!source || !normalizedTerm) return false;
+  if (AMBIGUOUS_SINGLE_TERMS.has(normalizedTerm) && source !== normalizedTerm) return false;
 
   const escaped = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
   return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(source);
+}
+
+export function getFoodCategoryHintKeys(foodName: string) {
+  const source = normalizeFoodText(foodName);
+  if (!source) return [];
+
+  const keys = new Set<string>();
+  CATEGORY_HINTS.forEach((hint) => {
+    if (hint.terms.some((term) => hasTerm(source, term))) {
+      hint.categoryKeys.forEach((key) => keys.add(normalizeFoodText(key)));
+    }
+  });
+  return Array.from(keys);
+}
+
+function categoryMatchesHint(category: FoodCategoryLike, hintKeys: string[]) {
+  if (!hintKeys.length) return false;
+  const terms = categoryTerms(category);
+  const categoryKeys = [
+    ...terms.names,
+    ...terms.aliases,
+    ...terms.keywords,
+  ].map(normalizeFoodText);
+  return hintKeys.some((hintKey) => categoryKeys.includes(hintKey));
 }
 
 function categoryTerms(category: FoodCategoryLike) {
@@ -101,6 +143,12 @@ function scoreCategory(foodName: string, category: FoodCategoryLike): ScoredCate
   const terms = categoryTerms(category);
   const matchedTerms: string[] = [];
   let score = 0;
+  const hintKeys = getFoodCategoryHintKeys(foodName);
+
+  if (categoryMatchesHint(category, hintKeys)) {
+    matchedTerms.push('category hint');
+    score += 12;
+  }
 
   const apply = (items: string[], weight: number) => {
     for (const term of items) {

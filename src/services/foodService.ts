@@ -3,11 +3,13 @@ import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
 import { HouseholdMember } from '../models/householdMember.model';
 import { Notification } from '../models/notification.model';
-import { resolveNutritionForFood } from './nutritionService';
+import { buildInventoryNutritionDisplay, resolveNutritionForFood } from './nutritionService';
 import { FoodCategoryLike, FoodCategoryValidationResult } from '../utils/foodCategoryValidation';
 import { classifyFoodCategory } from './foodCategoryClassifierService';
 import { Household } from '../models/household.model';
 import { getUserCurrentSubscription } from './subscriptionService';
+import { validateNutritionSnapshot } from '../utils/nutritionValidation';
+import { referenceFoodStatus } from '../utils/storageGuidance';
 
 const CATEGORY_SELECT = 'categoryName displayName description aliases keywords foodExamples sortOrder';
 
@@ -45,14 +47,8 @@ export function buildOwnerQuery(context: any) {
 }
 
 // ─── Tính status dựa vào expiryDate ──────────────────────────────────────────
-export function computeFoodStatus(expiryDate: Date): string {
-  const now = new Date();
-  const diffMs = expiryDate.getTime() - now.getTime();
-  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffDays < 0) return 'EXPIRED';
-  if (diffDays <= 3) return 'NEAR_EXPIRY';
-  return 'SAFE';
+export function computeFoodStatus(expiryDate: Date, basis?: string): string {
+  return referenceFoodStatus(expiryDate, basis);
 }
 
 // ─── Tính freshnessScore (0–100) ─────────────────────────────────────────────
@@ -86,6 +82,10 @@ function neutralCategoryValidation(): FoodCategoryValidationResult {
     confidence: 'NONE',
     matchedCategoryIds: [],
   };
+}
+
+function sanitizeNutritionSnapshot(value: any, fallbackUnit?: string) {
+  return validateNutritionSnapshot(value, fallbackUnit).value;
 }
 
 async function createCategoryMismatchNotification(userId: string, foodItem: any, validation?: FoodCategoryValidationResult) {
@@ -122,7 +122,7 @@ async function enforceCategoryValidation(item: any, userId: string, categories?:
       categories: categoryList,
       allowAi,
     });
-    const nextStatus = applyCategoryValidationStatus(raw.status, validation);
+    const nextStatus = applyCategoryValidationStatus(computeFoodStatus(new Date(raw.expiryDate), raw.expiryBasis), validation);
 
     if (nextStatus !== raw.status) {
       if (typeof item.set === 'function') {
@@ -182,19 +182,35 @@ async function enrichFoodNutrition(
     foodName: raw.foodName,
     categoryId,
     quantity: raw.quantity,
-    unit: raw.unit
+    unit: raw.unit,
+    nutritionSnapshot: raw.nutritionSnapshot,
   });
+  const nutritionDisplay = buildInventoryNutritionDisplay(nutrition, raw.quantity, raw.unit);
+  const totalNutrition = {
+    calories: nutrition.calories,
+    macroSummary: nutrition.macroSummary,
+  };
 
   return {
     ...raw,
-    calories: nutrition.calories,
-    macroSummary: nutrition.macroSummary,
+    calories: totalNutrition.calories,
+    macroSummary: totalNutrition.macroSummary,
+    totalNutrition,
+    nutritionReference: nutrition.referenceNutrition,
+    nutritionDisplay: {
+      ...nutritionDisplay,
+      source: nutrition.source,
+      estimated: nutrition.estimated,
+      matched: nutrition.matched,
+    },
     nutrition: {
-      calories: nutrition.calories,
-      macroSummary: nutrition.macroSummary,
+      ...totalNutrition,
       matched: nutrition.matched,
       nutritionFactId: nutrition.nutritionFactId,
-      unit: nutrition.unit
+      unit: nutrition.unit,
+      baseQuantity: nutrition.baseQuantity,
+      source: nutrition.source,
+      estimated: nutrition.estimated,
     },
     categoryValidation: resolvedCategoryValidation,
     categoryWarning: resolvedCategoryValidation.warning,
@@ -239,7 +255,7 @@ export async function getFoodItemById(foodId: string, userId: string, ownerType?
 }
 
 // ─── CREATE food item ─────────────────────────────────────────────────────────
-export async function createFoodItem(userId: string, data: any, ownerType?: string, householdId?: string) {
+export async function createFoodItem(userId: string, data: any, ownerType?: string, householdId?: string, options: { allowCategoryAi?: boolean; provenance?: Record<string, unknown> } = {}) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
   const {
     categoryId,
@@ -252,6 +268,7 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
     expiryDate,
     quantity,
     unit,
+    nutritionSnapshot,
   } = data;
 
   // Validate required fields
@@ -287,21 +304,22 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
 
   // Validate storage location belongs to user
   const location = await StorageLocation.findOne({ _id: storageLocationId, ...buildOwnerQuery(context), isActive: true });
-  if (!location) throw new Error('Storage location not found or not available for this inventory');
+  if (!location) throw new Error('Vị trí lưu trữ không tồn tại hoặc không thuộc kho đang chọn');
 
   const expiry = new Date(expiryDate);
   const purchase = new Date(purchaseDate);
-  const status = computeFoodStatus(expiry);
+  const status = computeFoodStatus(expiry, options.provenance?.expiryBasis as string | undefined);
   const categories = await loadActiveCategories();
   const categoryValidation = await classifyFoodCategory({
     foodName: foodName.trim(),
     selectedCategoryId: category._id,
     categories,
-    allowAi: true,
+    allowAi: options.allowCategoryAi ?? true,
   });
   const freshnessScore = computeFreshnessScore(purchase, expiry);
 
   const foodItem = await FoodItem.create({
+    ...options.provenance,
     ...buildOwnerQuery(context),
     categoryId,
     storageLocationId,
@@ -313,6 +331,7 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
     expiryDate: expiry,
     quantity,
     unit,
+    nutritionSnapshot: sanitizeNutritionSnapshot(nutritionSnapshot, unit),
     status: applyCategoryValidationStatus(status, categoryValidation),
     freshnessScore,
     createdBy: userId,
@@ -335,11 +354,24 @@ export async function updateFoodItem(foodId: string, userId: string, data: any, 
   const allowedFields = [
     'foodName', 'imageUrl', 'categoryId', 'storageLocationId',
     'purchaseDate', 'expiryDate', 'quantity', 'unit', 'sourceType', 'expiryType',
+    'expiryBasis', 'storageStartedAt', 'foodState', 'packaging', 'storageProfile', 'containerLabel',
   ];
 
   const updateData: any = {};
   for (const field of allowedFields) {
     if (data[field] !== undefined) updateData[field] = data[field];
+  }
+  if (data.nutritionSnapshot !== undefined) {
+    updateData.nutritionSnapshot = sanitizeNutritionSnapshot(
+      data.nutritionSnapshot,
+      data.unit ?? item.unit,
+    );
+  }
+  if (updateData.expiryBasis && !['REFERENCE', 'PACKAGE', 'USER'].includes(updateData.expiryBasis)) throw new Error('Nguồn ngày bảo quản không hợp lệ');
+  if (item.expiryBasis === 'REFERENCE' && ['foodName', 'categoryId', 'storageLocationId', 'foodState', 'storageStartedAt', 'purchaseDate', 'packaging', 'storageProfile', 'expiryDate'].some((key) => updateData[key] !== undefined && String(updateData[key]) !== String((item as any)[key]))) {
+    // A general edit is a user-confirmed date, not a fresh policy calculation.
+    updateData.expiryBasis = updateData.expiryBasis === 'PACKAGE' ? 'PACKAGE' : 'USER';
+    updateData.storageGuide = null;
   }
 
   if (updateData.storageLocationId) {
@@ -348,7 +380,7 @@ export async function updateFoodItem(foodId: string, userId: string, data: any, 
       ...buildOwnerQuery(context),
       isActive: true
     });
-    if (!location) throw new Error('Storage location not found or not available for this inventory');
+    if (!location) throw new Error('Vị trí lưu trữ không tồn tại hoặc không thuộc kho đang chọn');
   }
 
   const nextCategoryId = updateData.categoryId ?? item.categoryId;
@@ -383,7 +415,7 @@ export async function updateFoodItem(foodId: string, userId: string, data: any, 
     categories,
     allowAi: true,
   });
-  updateData.status = applyCategoryValidationStatus(computeFoodStatus(expiryDate), categoryValidation);
+  updateData.status = applyCategoryValidationStatus(computeFoodStatus(expiryDate, updateData.expiryBasis ?? item.expiryBasis), categoryValidation);
   updateData.freshnessScore = computeFreshnessScore(purchaseDate, expiryDate);
   updateData.updatedBy = userId;
 

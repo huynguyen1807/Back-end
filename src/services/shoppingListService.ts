@@ -310,7 +310,7 @@ export async function addMissingIngredientsToShoppingList(
       const foodName = String(item.foodName || item.ingredientName || '').trim();
       const categoryId = item.categoryId?._id || item.categoryId;
       const quantity = Number(item.quantity) > 0 ? Number(item.quantity) : 1;
-      const unit = String(item.unit || 'item').trim() || 'item';
+      const unit = String(item.unit || 'g').trim() || 'g';
 
       if (foodName) {
         validateFoodName(foodName);
