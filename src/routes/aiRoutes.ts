@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { protect } from '../middleware/authMiddleware';
 import { createScanJob, getScanJob, cancelScanJob } from '../controllers/scanJobController';
+import { scanReceipt } from '../controllers/receiptScanController';
 import { getScanReviewData, saveScanItems, storageGuidance, uploadScanImage } from '../controllers/scanBatchController';
 import {
   recognizeFoodController,
@@ -41,6 +42,7 @@ const receiveScanImage: import('express').RequestHandler = (req, res, next) => {
   });
 };
 aiRouter.post('/scan-jobs', receiveScanImage, createScanJob);
+aiRouter.post('/scan-receipt', receiveScanImage, scanReceipt);
 aiRouter.get('/scan-jobs/:id', getScanJob);
 aiRouter.delete('/scan-jobs/:id', cancelScanJob);
 aiRouter.post('/scan-batches/:id/image', receiveScanImage, uploadScanImage);
