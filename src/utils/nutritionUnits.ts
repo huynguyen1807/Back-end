@@ -26,7 +26,7 @@ export function defaultNutritionBaseQuantity(unit?: string) {
   return ['g', 'kg', 'ml', 'l'].includes(normalized) ? 100 : 1;
 }
 
-function convertQuantity(quantity: number, fromUnit?: string, toUnit?: string) {
+export function convertNutritionQuantity(quantity: number, fromUnit?: string, toUnit?: string) {
   const from = normalizeNutritionUnit(fromUnit);
   const to = normalizeNutritionUnit(toUnit);
 
@@ -55,7 +55,7 @@ export function resolveNutritionFactor(
   nutritionUnit?: string,
   baseQuantity?: number,
 ) {
-  const convertedQuantity = convertQuantity(Math.max(0, Number(quantity) || 0), inputUnit, nutritionUnit);
+  const convertedQuantity = convertNutritionQuantity(Math.max(0, Number(quantity) || 0), inputUnit, nutritionUnit);
   const base = Number(baseQuantity) > 0
     ? Number(baseQuantity)
     : defaultNutritionBaseQuantity(nutritionUnit);

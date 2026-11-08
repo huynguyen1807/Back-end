@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { protect } from '../middleware/authMiddleware';
+import { createScanJob, getScanJob, cancelScanJob } from '../controllers/scanJobController';
+import { getScanReviewData, saveScanItems, storageGuidance, uploadScanImage } from '../controllers/scanBatchController';
 import {
   recognizeFoodController,
   predictExpiryController,
@@ -20,6 +22,31 @@ const aiRouter = Router();
 
 // Protect all AI routes with authentication middleware
 aiRouter.use(protect);
+
+const scanUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    if (['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) callback(null, true);
+    else callback(new Error('Vui lòng dùng ảnh JPEG, PNG hoặc WebP.'));
+  },
+});
+const receiveScanImage: import('express').RequestHandler = (req, res, next) => {
+  scanUpload.single('image')(req, res, (error) => {
+    if (error) {
+      res.status(400).json({ message: error.code === 'LIMIT_FILE_SIZE' ? 'Ảnh quá lớn. Vui lòng chọn ảnh nhỏ hơn 8 MB.' : error.message });
+      return;
+    }
+    next();
+  });
+};
+aiRouter.post('/scan-jobs', receiveScanImage, createScanJob);
+aiRouter.get('/scan-jobs/:id', getScanJob);
+aiRouter.delete('/scan-jobs/:id', cancelScanJob);
+aiRouter.post('/scan-batches/:id/image', receiveScanImage, uploadScanImage);
+aiRouter.get('/scan-batches/:id/review', getScanReviewData);
+aiRouter.post('/scan-batches/:id/items', saveScanItems);
+aiRouter.post('/storage-guidance', storageGuidance);
 
 aiRouter.post('/recognize-food', upload.single('image'), recognizeFoodController);
 aiRouter.post('/predict-expiry', predictExpiryController);

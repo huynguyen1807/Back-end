@@ -90,10 +90,14 @@ export const recognizeFoodController = async (req: AuthRequest, res: Response): 
       return;
     }
 
+    const ownerType = typeof req.query.ownerType === 'string' ? req.query.ownerType : undefined;
+    const householdId = typeof req.query.householdId === 'string' ? req.query.householdId : undefined;
     const validatedResult = await recognizeFoodFromImage({
       userId,
       imageBuffer: req.file.buffer,
-      mimeType: req.file.mimetype
+      mimeType: req.file.mimetype,
+      ownerType,
+      householdId,
     });
 
     const providerErrorCode = validatedResult.errorCode;
@@ -107,6 +111,8 @@ export const recognizeFoodController = async (req: AuthRequest, res: Response): 
 
     await ScanResult.create({
       userId,
+      ownerType: validatedResult.inventoryContext?.ownerType,
+      householdId: validatedResult.inventoryContext?.householdId,
       scanType: 'FOOD_IMAGE',
       productName: validatedResult.productName,
       confidenceScore: validatedResult.confidence,

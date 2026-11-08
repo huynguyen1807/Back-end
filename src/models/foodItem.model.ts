@@ -11,6 +11,19 @@ const foodItemSchema = new Schema(
     storageLocationId: { type: objectId, ref: 'StorageLocation', required: true },
     foodName: { type: String, required: true, trim: true },
     imageUrl: String,
+    originalImageUrl: String,
+    itemSourceImageUrl: String,
+    imageBoundingBox: [Number],
+    scanItemKey: String,
+    imageSourceScanId: { type: objectId, ref: 'ScanResult' },
+    containerLabel: { type: String, maxlength: 80 },
+    foodState: { type: String, enum: ['RAW', 'COOKED', 'UNKNOWN'] },
+    packaging: { type: String, enum: ['SEALED', 'OPENED', 'PORTIONED', 'UNKNOWN'] },
+    storageProfile: { type: String, maxlength: 40 },
+    storageStartedAt: Date,
+    expiryBasis: { type: String, enum: ['REFERENCE', 'PACKAGE', 'USER'] },
+    packageExpiryDate: Date,
+    storageGuide: Schema.Types.Mixed,
     sourceType: { type: String, enum: ['SUPERMARKET', 'MARKET'], required: true },
     expiryType: { type: String, enum: ['SCANNED', 'AI_PREDICTED', 'MANUAL'], required: true },
     purchaseDate: { type: Date, required: true },
@@ -52,5 +65,6 @@ foodItemSchema.index({ userId: 1, status: 1 });
 foodItemSchema.index({ householdId: 1, status: 1 });
 foodItemSchema.index({ storageLocationId: 1 });
 foodItemSchema.index({ categoryId: 1 });
+foodItemSchema.index({ createdBy: 1, scanResultId: 1, scanItemKey: 1 }, { unique: true, partialFilterExpression: { scanItemKey: { $type: 'string' } } });
 
 export const FoodItem = existingModel('FoodItem', foodItemSchema, 'food_items');

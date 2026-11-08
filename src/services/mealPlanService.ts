@@ -2,12 +2,12 @@ import { MealPlan } from '../models/mealPlan.model';
 import { FoodItem } from '../models/foodItem.model';
 import { AIGeneratedData } from '../models/aiGeneratedData.model';
 import { Recipe } from '../models/recipe.model';
+import { RecipeRecommendationState } from '../models/recipeRecommendationState.model';
 import { UserPreference } from '../models/userPreference.model';
 import { VideoRecipeSource } from '../models/videoRecipeSource.model';
 import {
   calculateMealTotals,
   calculateNutritionForIngredients,
-  endOfDay,
   resolveNutritionForFood,
   startOfDay
 } from './nutritionService';
@@ -23,6 +23,14 @@ import {
 } from './videoRecipeExtractor';
 import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
 import { normalizeFoodText } from '../utils/foodCategoryValidation';
+import {
+  assertSchedulableDateTime,
+  assertSchedulablePlanDate,
+  buildInventoryContextKey,
+  getMealTypeForScheduledTime,
+  planDateFromKey,
+  toPlanDateKey,
+} from '../utils/mealSchedule';
 
 type InventoryPriorityFood = {
   _id: any;
@@ -365,6 +373,9 @@ async function resolveMealPayload(meal: any, ownerQuery: any = {}) {
 async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any = {}) {
   if (!data.planDate) throw new Error('planDate is required');
 
+  const ownerType = data.ownerType === 'HOUSEHOLD' ? 'HOUSEHOLD' : 'USER';
+  const planDateKey = toPlanDateKey(data.planDate);
+
   const meals = Array.isArray(data.meals)
     ? await Promise.all(data.meals.map((meal: any) => resolveMealPayload(meal, ownerQuery)))
     : [];
@@ -372,9 +383,11 @@ async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any =
 
   return {
     userId,
-    inventoryOwnerType: data.ownerType === 'HOUSEHOLD' ? 'HOUSEHOLD' : 'USER',
-    householdId: data.ownerType === 'HOUSEHOLD' ? data.householdId : undefined,
-    planDate: startOfDay(data.planDate),
+    inventoryOwnerType: ownerType,
+    householdId: ownerType === 'HOUSEHOLD' ? data.householdId : undefined,
+    inventoryContextKey: buildInventoryContextKey(ownerType, data.householdId),
+    planDate: planDateFromKey(planDateKey),
+    planDateKey,
     goal: data.goal,
     totalCalories: totals.totalCalories,
     macroSummary: totals.macroSummary,
@@ -382,6 +395,41 @@ async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any =
     generatedBy: data.generatedBy || 'USER',
     note: data.note
   };
+}
+
+function applyPlanDateQuery(filter: any, query: { date?: any; startDate?: any; endDate?: any }) {
+  if (!query.date && !query.startDate && !query.endDate) return;
+
+  const exactKey = query.date ? toPlanDateKey(query.date) : undefined;
+  const startKey = exactKey || (query.startDate ? toPlanDateKey(query.startDate) : undefined);
+  const endKey = exactKey || (query.endDate ? toPlanDateKey(query.endDate) : undefined);
+  if (startKey && endKey && startKey > endKey) {
+    throw new Error('startDate must not be after endDate');
+  }
+
+  const keyCondition: any = exactKey || {};
+  const legacyCondition: any = {};
+  if (!exactKey && startKey) keyCondition.$gte = startKey;
+  if (!exactKey && endKey) keyCondition.$lte = endKey;
+  if (startKey) legacyCondition.$gte = planDateFromKey(startKey);
+  if (endKey) {
+    legacyCondition.$lte = new Date(
+      planDateFromKey(endKey).getTime() + 24 * 60 * 60 * 1000 - 1,
+    );
+  }
+
+  filter.$and = [
+    ...(filter.$and || []),
+    {
+      $or: [
+        { planDateKey: keyCondition },
+        {
+          planDateKey: { $exists: false },
+          planDate: legacyCondition,
+        },
+      ],
+    },
+  ];
 }
 
 function getStoredPlanOwnerQuery(plan: any) {
@@ -430,15 +478,9 @@ export async function listMealPlans(userId: string, query: any = {}) {
     }
   }
 
-  if (query.date) {
-    filter.planDate = { $gte: startOfDay(query.date), $lte: endOfDay(query.date) };
-  } else if (query.startDate || query.endDate) {
-    filter.planDate = {};
-    if (query.startDate) filter.planDate.$gte = startOfDay(query.startDate);
-    if (query.endDate) filter.planDate.$lte = endOfDay(query.endDate);
-  }
+  applyPlanDateQuery(filter, query);
 
-  const plans = await MealPlan.find(filter).sort({ planDate: 1, updatedAt: -1 });
+  const plans = await MealPlan.find(filter).sort({ planDateKey: 1, planDate: 1, updatedAt: -1 });
   await Promise.all(plans.map(backfillMealPlanNutrition));
   return MealPlan.populate(plans, [
     { path: 'meals.recipeId', select: 'recipeName imageUrl calories macroSummary' },
@@ -455,7 +497,37 @@ export async function getMealPlanById(planId: string, userId: string) {
   return plan;
 }
 
+function getNewOrRescheduledMeals(oldMeals: any[] = [], nextMeals: any[] = []) {
+  const oldCounts = new Map<string, number>();
+  oldMeals.forEach((meal) => {
+    const key = mealFingerprint(meal);
+    oldCounts.set(key, (oldCounts.get(key) || 0) + 1);
+  });
+
+  return nextMeals.filter((meal) => {
+    const key = mealFingerprint(meal);
+    const remaining = oldCounts.get(key) || 0;
+    if (remaining > 0) {
+      oldCounts.set(key, remaining - 1);
+      return false;
+    }
+    return true;
+  });
+}
+
+function assertMealsCanBeScheduled(planDate: string | Date, meals: any[], now = new Date()) {
+  const planDateKey = assertSchedulablePlanDate(planDate, now);
+  meals.forEach((meal) => assertSchedulableDateTime(planDateKey, meal.scheduledTime, now));
+  return planDateKey;
+}
+
+function isDuplicateMealPlanKeyError(error: any) {
+  return Number(error?.code) === 11000
+    && String(error?.message || '').includes('unique_user_inventory_context_plan_day');
+}
+
 export async function createMealPlan(userId: string, data: any) {
+  assertMealsCanBeScheduled(data.planDate, Array.isArray(data.meals) ? data.meals : []);
   const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
   const ownerQuery = buildOwnerQuery(context);
   const payload = await buildMealPlanPayload(userId, {
@@ -464,7 +536,80 @@ export async function createMealPlan(userId: string, data: any) {
     householdId: context.householdId,
   }, ownerQuery);
   payload.meals = await applyMealInventoryTransitions([], payload.meals, ownerQuery);
-  return MealPlan.create(payload);
+  try {
+    return await MealPlan.create(payload);
+  } catch (error) {
+    if (isDuplicateMealPlanKeyError(error)) {
+      throw new Error('A meal plan already exists for this date');
+    }
+    throw error;
+  }
+}
+
+export async function addMealToPlan(userId: string, data: any) {
+  if (!data.planDate) throw new Error('planDate is required');
+  if (!data.meal) throw new Error('meal is required');
+
+  const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  const ownerQuery = buildOwnerQuery(context);
+  const { dateKey, scheduledTime } = assertSchedulableDateTime(
+    data.planDate,
+    data.meal.scheduledTime,
+  );
+  const inventoryContextKey = buildInventoryContextKey(context.ownerType, context.householdId);
+  const meal = await resolveMealPayload({
+    ...data.meal,
+    mealType: getMealTypeForScheduledTime(scheduledTime),
+    scheduledTime,
+    status: 'PENDING',
+    inventoryApplied: false,
+  }, ownerQuery);
+  const mealCalories = roundTwo(Number(meal.calories) || 0);
+  const mealMacros = meal.macroSummary || { protein: 0, carbs: 0, fat: 0 };
+  const filter = { userId, inventoryContextKey, planDateKey: dateKey };
+  const update = {
+    $setOnInsert: {
+      userId,
+      inventoryOwnerType: context.ownerType,
+      householdId: context.ownerType === 'HOUSEHOLD' ? context.householdId : undefined,
+      inventoryContextKey,
+      planDate: planDateFromKey(dateKey),
+      planDateKey: dateKey,
+      goal: data.goal,
+      generatedBy: 'USER',
+      note: data.note,
+    },
+    $push: { meals: meal },
+    $inc: {
+      totalCalories: mealCalories,
+      'macroSummary.protein': roundTwo(Number(mealMacros.protein) || 0),
+      'macroSummary.carbs': roundTwo(Number(mealMacros.carbs) || 0),
+      'macroSummary.fat': roundTwo(Number(mealMacros.fat) || 0),
+    },
+  };
+
+  let plan;
+  try {
+    plan = await MealPlan.findOneAndUpdate(filter, update, {
+      upsert: true,
+      returnDocument: 'after',
+      runValidators: true,
+    });
+  } catch (error) {
+    if (!isDuplicateMealPlanKeyError(error)) throw error;
+    plan = await MealPlan.findOneAndUpdate(filter, {
+      $push: { meals: meal },
+      $inc: update.$inc,
+    }, {
+      returnDocument: 'after',
+      runValidators: true,
+    });
+  }
+
+  if (!plan) throw new Error('Meal plan could not be saved');
+  await plan.populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
+  await plan.populate('meals.usedFoods.foodItemId', 'foodName quantity unit status');
+  return plan;
 }
 
 export async function updateMealPlan(planId: string, userId: string, data: any) {
@@ -485,6 +630,16 @@ export async function updateMealPlan(planId: string, userId: string, data: any) 
     planDate: data.planDate || existing.planDate,
     meals: data.meals || existing.meals
   }, ownerQuery);
+
+  const existingDateKey = existing.planDateKey || toPlanDateKey(existing.planDate);
+  if (payload.planDateKey !== existingDateKey) {
+    assertMealsCanBeScheduled(payload.planDateKey, payload.meals);
+  } else {
+    const addedOrRescheduledMeals = getNewOrRescheduledMeals(existing.meals || [], payload.meals);
+    if (addedOrRescheduledMeals.length) {
+      assertMealsCanBeScheduled(payload.planDateKey, addedOrRescheduledMeals);
+    }
+  }
 
   payload.meals = await applyMealInventoryTransitions(existing.meals || [], payload.meals, ownerQuery);
   const totals = calculateMealTotals(payload.meals);
@@ -512,16 +667,16 @@ export async function deleteMealPlan(planId: string, userId: string) {
 }
 
 export async function getMealPlanSummary(userId: string, date: string | Date) {
-  const plans = await MealPlan.find({
-    userId,
-    planDate: { $gte: startOfDay(date), $lte: endOfDay(date) }
-  });
+  const filter: any = { userId };
+  applyPlanDateQuery(filter, { date });
+  const plans = await MealPlan.find(filter);
 
   const meals = plans.flatMap((plan) => plan.meals || []);
   const totals = calculateMealTotals(meals);
 
   return {
-    date: startOfDay(date),
+    date: planDateFromKey(toPlanDateKey(date)),
+    planDateKey: toPlanDateKey(date),
     mealCount: meals.length,
     ...totals
   };
@@ -1752,13 +1907,20 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     (sum, allocation) => sum + (Number(allocation.target) || 0),
     0
   );
-  const recipes = await Recipe.find({
-    isActive: true,
-    $or: [
-      { sourceType: 'SYSTEM' },
-      { createdBy: userId }
-    ]
-  });
+  const [recipes, dismissedRecipeIds] = await Promise.all([
+    Recipe.find({
+      isActive: true,
+      $or: [
+        { sourceType: 'SYSTEM' },
+        { createdBy: userId }
+      ]
+    }),
+    RecipeRecommendationState.distinct('recipeId', { userId, status: 'DISMISSED' }),
+  ]);
+  const dismissedRecipeIdSet = new Set(dismissedRecipeIds.map((id) => String(id)));
+  const recommendableRecipes = recipes.filter(
+    (recipe) => !dismissedRecipeIdSet.has(String(recipe._id)),
+  );
   const avoidRecipes = Array.isArray(data.avoidRecipes) ? data.avoidRecipes : [];
   const recipeReferences = [...avoidRecipes, ...recipes];
   const aiDrafts = await generateAiRecipeDrafts({
@@ -1808,6 +1970,10 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
           calorieTarget: generatedCalorieTarget
         }
       );
+      if (dismissedRecipeIdSet.has(String(recommendation.recipe?._id))) {
+        usedDraftKeys.add(draftKey);
+        continue;
+      }
       const recipeCalories = Number(recommendation.recipe?.calories) || 0;
       if (
         recipeCalories > 0 &&
@@ -1834,7 +2000,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     }
   }
 
-  const scoredRecipes = recipes
+  const scoredRecipes = recommendableRecipes
     .map((recipe) => {
       const scoring = recipeInventoryScore(recipe, foods);
       const availability = analyzeRecipeAvailability(recipe.ingredients || [], priorityFoods);

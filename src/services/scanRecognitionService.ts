@@ -1,7 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 import { FoodCategory } from '../models/foodCategory.model';
-import { NutritionFact } from '../models/nutritionFact.model';
 import { StorageLocation } from '../models/storageLocation.model';
 import { StorageRule } from '../models/storageRule.model';
 import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
@@ -11,42 +10,18 @@ import {
   getFoodCategoryHintKeys,
   normalizeFoodText,
 } from '../utils/foodCategoryValidation';
-
-type GeminiScanCandidate = {
-  foodName?: string;
-  normalizedName?: string;
-  categoryName?: string;
-  confidence?: number;
-  reason?: string;
-};
-
-type GeminiScanResult = {
-  isFood?: boolean;
-  foodName?: string;
-  normalizedName?: string;
-  categoryName?: string;
-  confidence?: number;
-  candidates?: GeminiScanCandidate[];
-  visualEvidence?: string[];
-  estimatedQuantity?: {
-    quantity?: number;
-    unit?: string;
-  };
-  preferredStorageType?: string;
-  estimatedExpiryDays?: number;
-  nutritionPer100g?: {
-    calories?: number;
-    protein?: number;
-    carbs?: number;
-    fat?: number;
-  };
-  warnings?: string[];
-};
+import { validateNutritionSnapshot } from '../utils/nutritionValidation';
+import { GeminiScanCandidate, GeminiScanFood, getDistinctScanFoods, MAX_SCAN_FOODS, parseScanPayload } from '../utils/scanPayload';
+import { getStorageGuidance } from '../utils/storageGuidance';
 
 type RecognitionInput = {
   userId: string;
   imageBuffer: Buffer;
   mimeType: string;
+  ownerType?: string;
+  householdId?: string;
+  signal?: AbortSignal;
+  onStage?: (stage: 'recognizing' | 'enriching') => void;
 };
 
 type GeminiFailureCode =
@@ -54,6 +29,7 @@ type GeminiFailureCode =
   | 'GEMINI_QUOTA_EXCEEDED'
   | 'GEMINI_MODEL_UNAVAILABLE'
   | 'GEMINI_INVALID_RESPONSE'
+  | 'GEMINI_TIMEOUT'
   | 'GEMINI_UNAVAILABLE';
 
 type GeminiFailure = {
@@ -112,24 +88,6 @@ function clamp01(value: any) {
   return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
-function parseJsonObject(text: string): GeminiScanResult | null {
-  const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-  try {
-    return JSON.parse(cleanText);
-  } catch (_) {
-    const start = cleanText.indexOf('{');
-    const end = cleanText.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(cleanText.slice(start, end + 1));
-      } catch (_) {
-        return null;
-      }
-    }
-  }
-  return null;
-}
-
 function getCategoryId(category?: FoodCategoryLike | null) {
   return category?._id ? String(category._id) : undefined;
 }
@@ -150,7 +108,7 @@ function buildPrompt(categories: FoodCategoryLike[]) {
 
   return `
 You are a food image recognition engine for a Vietnamese household inventory app.
-Analyze the image and identify the main food item only.
+Identify ALL distinct visible food types in the image, up to ${MAX_SCAN_FOODS} foods, in a single pass.
 
 Rules:
 - Return Vietnamese food names with diacritics.
@@ -158,20 +116,34 @@ Rules:
 - Map the food to one of the existing categories by categoryName/displayName/aliases/examples.
 - Use grocery/culinary classification, not botanical taxonomy.
 - Do not confuse Vietnamese words with accents: "cà rốt", "cà chua" are vegetables, not fish ("cá").
-- Return multiple candidates only when the image is ambiguous.
+- Each distinct food belongs in foods. Group identical foods together and estimate their combined quantity.
+- Return a tight boundingBox [yMin,xMin,yMax,xMax] for each food, coordinates normalized to 0..1000 in the exact supplied image. Do not return the full scene for every food. If a food cannot be localized reliably, omit its box.
+- Set visibility=CLEAR, PACKAGED or OCCLUDED. Never guess contents of opaque bags. Recognize packaging only when a readable label or visible food supports it; flag uncertainty.
+- Set foodState=RAW or COOKED only when clearly visible; otherwise UNKNOWN. Never infer purchase date, freshness, safety or shelf life from appearance.
+- Candidates are alternative names for the SAME food, never other objects in the image. Return at most two alternatives per food, only when ambiguous.
+- Return foods=[] when no food is visible. Do not invent hidden foods or infer ingredients inside prepared dishes.
+- Names, storage, quantities, warnings and nutrition must belong to their own food, not be copied from the main item.
+- Keep explanations brief. Shelf life is an estimate; never claim visual freshness proves food safety.
 - Do not invent category names outside the provided category list.
 - Keep foodName short and natural, e.g. "Dưa leo", "Nhãn lồng", "Thịt bò", "Trứng gà".
+- nutritionPer100g is for 100 g of the edible portion, never for the total amount visible in the image.
+- Estimate nutrition for the recognized state when visible (raw/cooked, skin-on/skinless) and keep calories consistent with protein, carbs, and fat.
+- Use zero only when a nutrient is genuinely absent; do not copy the same macro values across unrelated foods.
 
 Available categories:
-${JSON.stringify(compactCategories, null, 2)}
+${JSON.stringify(compactCategories)}
 
 Return only raw JSON:
 {
+  "foods": [{
   "isFood": true,
-  "foodName": "Tên thực phẩm chính",
+  "foodName": "Tên thực phẩm",
   "normalizedName": "ten thuc pham chinh",
   "categoryName": "Tên danh mục từ danh sách",
   "confidence": 0.0,
+  "boundingBox": [100,100,500,500],
+  "visibility": "CLEAR|PACKAGED|OCCLUDED",
+  "foodState": "RAW|COOKED|UNKNOWN",
   "candidates": [
     {
       "foodName": "Tên ứng viên",
@@ -184,8 +156,9 @@ Return only raw JSON:
   "visualEvidence": ["dấu hiệu nhìn thấy trong ảnh"],
   "estimatedQuantity": { "quantity": 1, "unit": "kg|g|ml|l|quả|cái" },
   "preferredStorageType": "REFRIGERATOR|OUTSIDE|FREEZER|PANTRY|KITCHEN_CABINET",
-  "estimatedExpiryDays": 3,
   "nutritionPer100g": { "calories": 0, "protein": 0, "carbs": 0, "fat": 0 },
+  "warnings": []
+  }],
   "warnings": []
 }`;
 }
@@ -215,9 +188,16 @@ async function recognizeWithGemini(input: RecognitionInput, categories: FoodCate
   let lastFailure: GeminiFailure | undefined;
   let attemptedCount = 0;
   const maxAttempts = getMaxModelAttempts();
+  const configuredTimeout = Number(process.env.GEMINI_SCAN_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? Math.min(45_000, Math.max(1000, configuredTimeout)) : 25_000;
+  const deadline = Date.now() + timeoutMs;
 
   for (const modelName of getGeminiModelNames()) {
     if (attemptedCount >= maxAttempts) break;
+    input.signal?.throwIfAborted();
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
     const cooldownUntil = modelCooldownUntil.get(modelName) || 0;
     if (Date.now() < cooldownUntil) {
       lastFailure = {
@@ -232,9 +212,11 @@ async function recognizeWithGemini(input: RecognitionInput, categories: FoodCate
     modelAttempts.push(modelName);
     attemptedCount += 1;
     try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent([prompt, imagePart]);
-      const parsed = parseJsonObject(result.response.text());
+      const model = genAI.getGenerativeModel({ model: modelName, generationConfig: {
+        responseMimeType: 'application/json', maxOutputTokens: 6000, temperature: 0.1,
+      } });
+      const result = await model.generateContent([prompt, imagePart], { timeout: remainingMs, signal: input.signal });
+      const parsed = parseScanPayload(result.response.text());
       if (parsed) return { parsed, modelUsed: modelName, failure: undefined };
       lastFailure = {
         code: 'GEMINI_INVALID_RESPONSE',
@@ -242,6 +224,7 @@ async function recognizeWithGemini(input: RecognitionInput, categories: FoodCate
         modelAttempts: [...modelAttempts],
       };
     } catch (error: any) {
+      input.signal?.throwIfAborted();
       const status = error?.status ? `status=${error.status}` : '';
       const message = error?.message || String(error);
       console.warn(`[Gemini scan recognition error:${modelName}] ${status} ${message}`);
@@ -251,7 +234,8 @@ async function recognizeWithGemini(input: RecognitionInput, categories: FoodCate
         const cooldownMs = Math.max(15, retryAfterSeconds || 60) * 1000;
         modelCooldownUntil.set(modelName, Date.now() + cooldownMs);
       }
-      const code: GeminiFailureCode = error?.status === 429
+      const code: GeminiFailureCode = Date.now() >= deadline || error?.name === 'AbortError'
+        ? 'GEMINI_TIMEOUT' : error?.status === 429
         ? 'GEMINI_QUOTA_EXCEEDED'
         : error?.status === 404
           ? 'GEMINI_MODEL_UNAVAILABLE'
@@ -293,6 +277,8 @@ function getFailureWarning(failure?: GeminiFailure) {
   if (failure.code === 'GEMINI_MODEL_UNAVAILABLE') {
     return 'Model Gemini dang cau hinh khong kha dung. Hay dat GEMINI_MODEL hoac GEMINI_MODELS trong .env backend bang model dang duoc cap quyen.';
   }
+
+  if (failure.code === 'GEMINI_TIMEOUT') return 'Nhận diện mất nhiều thời gian hơn dự kiến. Hãy thử ảnh rõ hơn, ít chồng lấp hoặc thử lại.';
 
   return 'Gemini dang khong kha dung nen chua the nhan dien anh. Vui long thu lai hoac nhap thu cong.';
 }
@@ -414,7 +400,13 @@ function defaultExpiryDays(storageType: string) {
   return 3;
 }
 
-async function resolveStorage(userId: string, categoryId?: string, preferredStorageType?: string) {
+type InventoryOwnerContext = Awaited<ReturnType<typeof getInventoryOwnerContext>>;
+
+async function resolveStorage(
+  ownerContext: InventoryOwnerContext,
+  categoryId?: string,
+  preferredStorageType?: string,
+) {
   const rule = categoryId
     ? await StorageRule.findOne({ categoryId, status: 'OFFICIAL' })
       .sort({ priority: -1, estimatedDays: -1 })
@@ -422,7 +414,7 @@ async function resolveStorage(userId: string, categoryId?: string, preferredStor
     : null;
 
   const storageType = normalizeStorageType(rule?.storageType || preferredStorageType);
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const ownerQuery = buildOwnerQuery(ownerContext);
   const location = await StorageLocation.findOne({
     ...ownerQuery,
     storageType,
@@ -441,13 +433,13 @@ async function resolveStorage(userId: string, categoryId?: string, preferredStor
     temperature: storageType === 'FREEZER'
       ? '-18°C'
       : storageType === 'REFRIGERATOR'
-        ? '2-6°C'
+        ? '≤ 4°C'
         : '20-25°C',
     estimatedDays: Number(rule?.estimatedDays) || defaultExpiryDays(storageType),
   };
 }
 
-async function resolveNutrition(foodName: string, categoryId?: string, aiNutrition?: GeminiScanResult['nutritionPer100g']) {
+async function resolveNutrition(foodName: string, categoryId?: string, aiNutrition?: GeminiScanFood['nutritionPer100g']) {
   const nutrition = await resolveNutritionForFood({
     foodName,
     categoryId,
@@ -455,138 +447,138 @@ async function resolveNutrition(foodName: string, categoryId?: string, aiNutriti
     unit: 'g',
   });
 
-  if (nutrition.matched) {
+  if (nutrition.source === 'NUTRITION_FACT') {
     return {
       calories: nutrition.calories,
       protein: nutrition.macroSummary.protein,
       carbs: nutrition.macroSummary.carbs,
       fat: nutrition.macroSummary.fat,
-      source: 'DATABASE',
+      source: 'NUTRITION_FACT',
+      matched: true,
+    };
+  }
+
+  const validatedAiNutrition = validateNutritionSnapshot({
+    ...aiNutrition,
+    baseQuantity: 100,
+    unit: 'g',
+    source: 'SCAN_AI',
+  });
+  if (validatedAiNutrition.value) {
+    const snapshot = validatedAiNutrition.value;
+    return {
+      calories: snapshot.calories,
+      protein: snapshot.protein,
+      carbs: snapshot.carbs,
+      fat: snapshot.fat,
+      source: 'GEMINI',
       matched: true,
     };
   }
 
   return {
-    calories: Number(aiNutrition?.calories) || 0,
-    protein: Number(aiNutrition?.protein) || 0,
-    carbs: Number(aiNutrition?.carbs) || 0,
-    fat: Number(aiNutrition?.fat) || 0,
-    source: aiNutrition ? 'GEMINI' : 'NONE',
-    matched: false,
+    calories: nutrition.calories,
+    protein: nutrition.macroSummary.protein,
+    carbs: nutrition.macroSummary.carbs,
+    fat: nutrition.macroSummary.fat,
+    source: nutrition.source,
+    matched: nutrition.matched,
+    validationWarning: aiNutrition ? validatedAiNutrition.warning : undefined,
   };
 }
 
-async function hasOfficialNutrition(foodName: string, categoryId?: string) {
-  if (!foodName.trim()) return false;
-  const query: any = {
-    foodName: new RegExp(foodName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
-    status: 'OFFICIAL',
-  };
-  if (categoryId) query.categoryId = categoryId;
-  return Boolean(await NutritionFact.exists(query));
-}
-
-export async function recognizeFoodFromImage(input: RecognitionInput) {
-  const categories = await FoodCategory.find({ isActive: true })
-    .select(CATEGORY_SELECT)
-    .sort({ sortOrder: 1, categoryName: 1 })
-    .lean();
-
-  const { parsed, modelUsed, failure } = await recognizeWithGemini(input, categories);
+async function enrichRecognizedFood(
+  parsed: GeminiScanFood,
+  categories: FoodCategoryLike[],
+  ownerContext: InventoryOwnerContext,
+) {
   const warnings: string[] = [];
-
-  if (!parsed) {
+  const primary: GeminiScanCandidate = { foodName: parsed.foodName, normalizedName: parsed.normalizedName, categoryName: parsed.categoryName, confidence: parsed.confidence };
+  const rawCandidates = [primary, ...(Array.isArray(parsed.candidates) ? parsed.candidates : [])]
+    .filter((candidate) => candidate && typeof candidate.foodName === 'string' && candidate.foodName.trim());
+  const seen = new Set<string>();
+  const mappedCandidates = rawCandidates.map((candidate) => {
+    const category = mapCandidateToCategory(candidate, categories);
     return {
-      productName: 'Không xác định',
-      category: 'Chưa phân loại',
-      confidence: 0,
-      isFood: false,
-      normalizedName: '',
-      candidates: [],
-      visualEvidence: [],
-      estimatedQuantity: { quantity: 1, unit: 'kg' },
-      warnings: [getFailureWarning(failure)],
-      errorCode: failure?.code || 'GEMINI_INVALID_RESPONSE',
-      providerError: failure?.message,
-      retryAfterSeconds: failure?.retryAfterSeconds,
-      modelAttempts: failure?.modelAttempts || [],
-      aiProvider: 'GEMINI',
-      modelUsed,
+      foodName: candidate.foodName!.trim(),
+      normalizedName: candidate.normalizedName || normalizeFoodText(candidate.foodName || ''),
+      categoryId: getCategoryId(category), categoryName: getCategoryLabel(category),
+      confidence: clamp01(candidate.confidence ?? parsed.confidence), reason: candidate.reason,
     };
-  }
-
-  if (parsed.isFood === false) {
-    warnings.push('Ảnh không giống thực phẩm hoặc không đủ rõ để nhận diện.');
-  }
-
-  const rawCandidates = (parsed.candidates?.length ? parsed.candidates : [{
-    foodName: parsed.foodName,
-    normalizedName: parsed.normalizedName,
-    categoryName: parsed.categoryName,
-    confidence: parsed.confidence,
-  }]).filter((candidate) => candidate.foodName?.trim());
-
-  const mappedCandidates = rawCandidates
-    .map((candidate) => {
-      const category = mapCandidateToCategory(candidate, categories);
-      const confidence = clamp01(candidate.confidence ?? parsed.confidence);
-      return {
-        foodName: candidate.foodName!.trim(),
-        normalizedName: candidate.normalizedName || normalizeFoodText(candidate.foodName || ''),
-        categoryId: getCategoryId(category),
-        categoryName: getCategoryLabel(category),
-        confidence,
-        reason: candidate.reason,
-      };
-    })
-    .sort((a, b) => b.confidence - a.confidence)
-    .slice(0, 4);
-
+  }).filter((candidate) => {
+    const key = normalizeFoodText(candidate.foodName);
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  }).slice(0, 3);
+  // Primary identity stays first: alternatives must not replace the identity
+  // whose quantity, expiry and nutrition were supplied by the model.
   const best = mappedCandidates[0];
-  if (!best) {
-    warnings.push('Không có ứng viên thực phẩm đủ tin cậy.');
-  }
-  if (best && !best.categoryId) {
-    warnings.push('Không map được thực phẩm về danh mục trong database.');
-  }
-  if (best && best.confidence < 0.65) {
-    warnings.push('Độ tin cậy thấp, nên kiểm tra lại trước khi thêm vào inventory.');
-  }
-
-  const storage = await resolveStorage(input.userId, best?.categoryId, parsed.preferredStorageType);
-  const nutrition = await resolveNutrition(best?.foodName || '', best?.categoryId, parsed.nutritionPer100g);
-  const nutritionMatched = await hasOfficialNutrition(best?.foodName || '', best?.categoryId);
-  const estimatedDays = Math.max(
-    0,
-    Number(parsed.estimatedExpiryDays) || Number(storage.estimatedDays) || 3,
-  );
-
+  if (!best?.categoryId) warnings.push('Chưa khớp danh mục. Vui lòng chọn danh mục trước khi thêm.');
+  if (best && best.confidence < 0.65) warnings.push('Độ tin cậy thấp, vui lòng kiểm tra lại tên thực phẩm.');
+  const [storage, nutrition] = await Promise.all([
+    resolveStorage(ownerContext, best?.categoryId, parsed.preferredStorageType),
+    resolveNutrition(best?.foodName || '', best?.categoryId, parsed.nutritionPer100g),
+  ]);
+  const guidance = getStorageGuidance(best?.foodName || '', parsed.foodState ?? 'UNKNOWN', storage.storageType);
+  const estimatedDays = guidance?.minDays ?? 0;
+  if (!guidance) warnings.push('Chưa đủ dữ kiện để gợi ý ngày bảo quản. Hãy chọn trạng thái, nơi bảo quản và xác nhận ngày trên bao bì hoặc tự nhập.');
+  if (parsed.visibility !== 'CLEAR') warnings.push('Món đang trong bao hoặc bị che khuất. Hãy kiểm tra tên và vùng ảnh trước khi chọn lưu.');
+  if (nutrition.validationWarning) warnings.push('Dinh dưỡng AI chưa hợp lý; đã dùng dữ liệu dự phòng.');
+  const quantity = Number(parsed.estimatedQuantity?.quantity);
   return {
-    productName: best?.foodName || parsed.foodName || 'Không xác định',
-    category: best?.categoryName || 'Chưa phân loại',
-    confidence: best?.confidence || clamp01(parsed.confidence),
-    isFood: parsed.isFood !== false && Boolean(best),
-    normalizedName: best?.normalizedName || parsed.normalizedName || '',
-    categoryId: best?.categoryId,
-    categoryName: best?.categoryName,
+    productName: best?.foodName || 'Không xác định',
+    category: best?.categoryName || 'Chưa phân loại', confidence: best?.confidence ?? 0,
+    isFood: Boolean(best), normalizedName: best?.normalizedName || '',
+    categoryId: best?.categoryId, categoryName: best?.categoryName,
+    boundingBox: parsed.boundingBox, visibility: parsed.visibility, foodState: parsed.foodState ?? 'UNKNOWN',
+    storageGuide: guidance,
     candidates: mappedCandidates,
-    visualEvidence: Array.isArray(parsed.visualEvidence) ? parsed.visualEvidence.slice(0, 5) : [],
-    estimatedQuantity: {
-      quantity: Number(parsed.estimatedQuantity?.quantity) || 1,
-      unit: normalizeEstimatedQuantityUnit(parsed.estimatedQuantity?.unit),
-    },
+    visualEvidence: Array.isArray(parsed.visualEvidence) ? parsed.visualEvidence.filter((v) => typeof v === 'string').slice(0, 3) : [],
+    estimatedQuantity: { quantity: Number.isFinite(quantity) && quantity > 0 ? Math.min(quantity, 100_000) : 1, unit: normalizeEstimatedQuantityUnit(parsed.estimatedQuantity?.unit) },
     storageSuggestion: storage,
-    expiryEstimate: {
-      predictedDays: estimatedDays,
-      expiryDate: new Date(Date.now() + estimatedDays * 24 * 60 * 60 * 1000).toLocaleDateString('en-GB'),
-      explanation: storage.description,
-    },
-    nutritionEstimate: {
-      ...nutrition,
-      matched: nutritionMatched || nutrition.matched,
-    },
-    warnings: Array.from(new Set([...(parsed.warnings || []), ...warnings])).filter(Boolean),
-    aiProvider: 'GEMINI',
-    modelUsed,
+    expiryEstimate: { predictedDays: estimatedDays, expiryDate: new Date(Date.now() + estimatedDays * 86400000).toLocaleDateString('en-GB'), explanation: storage.description },
+    nutritionEstimate: nutrition,
+    warnings: [...new Set([...(Array.isArray(parsed.warnings) ? parsed.warnings.filter((w) => typeof w === 'string') : []), ...warnings])],
+  };
+}
+
+export async function recognizeFoodsFromImage(input: RecognitionInput) {
+  input.signal?.throwIfAborted();
+  const [ownerContext, categories] = await Promise.all([
+    getInventoryOwnerContext(input.userId, input.ownerType, input.householdId),
+    FoodCategory.find({ isActive: true }).select(CATEGORY_SELECT).sort({ sortOrder: 1, categoryName: 1 }).lean(),
+  ]);
+  input.signal?.throwIfAborted();
+  input.onStage?.('recognizing');
+  const { parsed, modelUsed, failure } = await recognizeWithGemini(input, categories);
+  input.signal?.throwIfAborted();
+  const inventoryContext = { ownerType: ownerContext.ownerType, householdId: ownerContext.householdId ? String(ownerContext.householdId) : undefined };
+  if (!parsed) return {
+    foods: [], warnings: [getFailureWarning(failure)], errorCode: failure?.code || 'GEMINI_INVALID_RESPONSE',
+    retryAfterSeconds: failure?.retryAfterSeconds, aiProvider: 'GEMINI', modelUsed, inventoryContext,
+  };
+  input.onStage?.('enriching');
+  const rawFoods = getDistinctScanFoods(parsed);
+  const foods: Awaited<ReturnType<typeof enrichRecognizedFood>>[] = [];
+  // Bounded parallel enrichment keeps one crowded photo from flooding MongoDB.
+  for (let start = 0; start < rawFoods.length; start += 3) {
+    input.signal?.throwIfAborted();
+    foods.push(...await Promise.all(rawFoods.slice(start, start + 3).map((food) => enrichRecognizedFood(food, categories, ownerContext))));
+  }
+  input.signal?.throwIfAborted();
+  const warnings = Array.isArray(parsed.warnings) ? parsed.warnings.filter((w) => typeof w === 'string') : [];
+  if (!foods.length) warnings.push('Chưa tìm thấy thực phẩm rõ ràng. Hãy đổi góc chụp hoặc chọn một ảnh khác.');
+  if (Array.isArray(parsed.foods) && parsed.foods.length >= MAX_SCAN_FOODS) warnings.push(`Mỗi ảnh nhận diện tối đa ${MAX_SCAN_FOODS} loại thực phẩm. Bạn có thể quét thêm ảnh cho những món còn lại.`);
+  return { foods, warnings, errorCode: undefined, retryAfterSeconds: undefined, aiProvider: 'GEMINI', modelUsed, inventoryContext };
+}
+
+// Compatibility for existing single-food clients. The new scanner uses scan jobs.
+export async function recognizeFoodFromImage(input: RecognitionInput) {
+  const batch = await recognizeFoodsFromImage(input);
+  return {
+    ...(batch.foods[0] ?? { productName: 'Không xác định', category: 'Chưa phân loại', confidence: 0, isFood: false, candidates: [] }),
+    warnings: [...batch.warnings, ...(batch.foods[0]?.warnings ?? [])],
+    errorCode: batch.errorCode, retryAfterSeconds: batch.retryAfterSeconds,
+    aiProvider: batch.aiProvider, modelUsed: batch.modelUsed, inventoryContext: batch.inventoryContext,
   };
 }
