@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 import { FoodCategory } from '../models/foodCategory.model';
+import { NutritionFact } from '../models/nutritionFact.model';
 import { StorageLocation } from '../models/storageLocation.model';
 import { StorageRule } from '../models/storageRule.model';
 import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
@@ -487,6 +488,16 @@ async function resolveNutrition(foodName: string, categoryId?: string, aiNutriti
   };
 }
 
+async function hasOfficialNutrition(foodName: string, categoryId?: string) {
+  if (!foodName.trim()) return false;
+  const query: any = {
+    foodName: new RegExp(foodName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+    status: 'OFFICIAL',
+  };
+  if (categoryId) query.categoryId = categoryId;
+  return Boolean(await NutritionFact.exists(query));
+}
+
 async function enrichRecognizedFood(
   parsed: GeminiScanFood,
   categories: FoodCategoryLike[],
@@ -515,9 +526,10 @@ async function enrichRecognizedFood(
   const best = mappedCandidates[0];
   if (!best?.categoryId) warnings.push('Chưa khớp danh mục. Vui lòng chọn danh mục trước khi thêm.');
   if (best && best.confidence < 0.65) warnings.push('Độ tin cậy thấp, vui lòng kiểm tra lại tên thực phẩm.');
-  const [storage, nutrition] = await Promise.all([
+  const [storage, nutrition, nutritionMatched] = await Promise.all([
     resolveStorage(ownerContext, best?.categoryId, parsed.preferredStorageType),
     resolveNutrition(best?.foodName || '', best?.categoryId, parsed.nutritionPer100g),
+    hasOfficialNutrition(best?.foodName || '', best?.categoryId),
   ]);
   const guidance = getStorageGuidance(best?.foodName || '', parsed.foodState ?? 'UNKNOWN', storage.storageType);
   const estimatedDays = guidance?.minDays ?? 0;
@@ -537,7 +549,7 @@ async function enrichRecognizedFood(
     estimatedQuantity: { quantity: Number.isFinite(quantity) && quantity > 0 ? Math.min(quantity, 100_000) : 1, unit: normalizeEstimatedQuantityUnit(parsed.estimatedQuantity?.unit) },
     storageSuggestion: storage,
     expiryEstimate: { predictedDays: estimatedDays, expiryDate: new Date(Date.now() + estimatedDays * 86400000).toLocaleDateString('en-GB'), explanation: storage.description },
-    nutritionEstimate: nutrition,
+    nutritionEstimate: { ...nutrition, matched: nutritionMatched || nutrition.matched },
     warnings: [...new Set([...(Array.isArray(parsed.warnings) ? parsed.warnings.filter((w) => typeof w === 'string') : []), ...warnings])],
   };
 }
