@@ -22,6 +22,13 @@ function eventDate(milliseconds: unknown, fallback = new Date()) {
   return Number.isFinite(numeric) && numeric > 0 ? new Date(numeric) : fallback;
 }
 
+function useRealDurationForSandbox(event: any) {
+  return (
+    process.env.REVENUECAT_SANDBOX_USE_REAL_DURATION === 'true' &&
+    event.environment === 'SANDBOX'
+  );
+}
+
 export function verifyRevenueCatAuthorization(authorization?: string) {
   const configured = process.env.REVENUECAT_WEBHOOK_AUTH?.trim();
   if (!configured) throw new Error('REVENUECAT_WEBHOOK_AUTH is not configured');
@@ -37,6 +44,17 @@ export async function processRevenueCatWebhook(payload: any) {
 
   const userId = event.app_user_id;
   if (!userId) throw new Error('RevenueCat event has no app_user_id');
+  const keepRealSandboxDuration = useRealDurationForSandbox(event);
+
+  // Test Store renews monthly products every 5 minutes and yearly products every hour.
+  // In demo mode, the initial purchase grants the configured 30/365 days and accelerated
+  // sandbox lifecycle events must not shorten or repeatedly extend that local entitlement.
+  if (
+    keepRealSandboxDuration &&
+    ['RENEWAL', 'SUBSCRIPTION_EXTENDED', 'UNCANCELLATION', 'EXPIRATION'].includes(event.type)
+  ) {
+    return { acknowledged: true, sandboxLifecycleIgnored: true };
+  }
 
   if (event.type === 'EXPIRATION') {
     await Subscription.updateMany({ userId, status: 'ACTIVE' }, { status: 'EXPIRED', autoRenew: false });
@@ -57,7 +75,9 @@ export async function processRevenueCatWebhook(payload: any) {
   const startDate = eventDate(event.purchased_at_ms);
   const fallbackEnd = new Date(startDate);
   fallbackEnd.setDate(fallbackEnd.getDate() + plan.durationDays);
-  const endDate = eventDate(event.expiration_at_ms, fallbackEnd);
+  const endDate = keepRealSandboxDuration
+    ? fallbackEnd
+    : eventDate(event.expiration_at_ms, fallbackEnd);
 
   await Subscription.updateMany(
     { userId, status: 'ACTIVE', planCode: { $ne: planCode } },
