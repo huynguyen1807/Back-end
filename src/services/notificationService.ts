@@ -22,6 +22,21 @@ export async function checkExpiryAndNotify(userId: string): Promise<number> {
     const expiry = new Date(food.expiryDate);
     const expiryDay = new Date(expiry.getFullYear(), expiry.getMonth(), expiry.getDate());
 
+    if (food.expiryBasis === 'REFERENCE') {
+      if (expiryDay <= threeDaysFromNow) {
+        const next = expiryDay < today ? 'NEED_CHECK' : 'NEAR_EXPIRY';
+        if (food.status !== next && food.status !== 'NEED_CHECK') { food.status = next; await food.save(); }
+        const exists = await Notification.findOne({ userId, foodItemId: food._id, title: 'Mốc kiểm tra bảo quản', type: 'STORAGE_WARNING' });
+        if (!exists) {
+          await Notification.create({ userId, foodItemId: food._id, title: 'Mốc kiểm tra bảo quản',
+            message: `"${food.foodName}" đến mốc kiểm tra tham khảo ${expiry.toLocaleDateString('vi-VN')}. Đây không phải kết luận thực phẩm đã hỏng hoặc còn an toàn; kiểm tra hướng dẫn bao bì và điều kiện bảo quản.`,
+            type: 'STORAGE_WARNING', priority: 'MEDIUM', isRead: false });
+          created++;
+        }
+      }
+      continue;
+    }
+
     if (expiryDay < today) {
       // Cập nhật status EXPIRED
       if (food.status !== 'EXPIRED') {
@@ -92,6 +107,7 @@ export async function checkStorageAndNotify(userId: string): Promise<number> {
 
   for (const food of foods) {
     const category = food.categoryId as any;
+    if (food.expiryBasis === 'REFERENCE') continue;
     const location = food.storageLocationId as any;
     if (!category?._id || !location?.storageType) continue;
 

@@ -2,12 +2,12 @@ import { MealPlan } from '../models/mealPlan.model';
 import { FoodItem } from '../models/foodItem.model';
 import { AIGeneratedData } from '../models/aiGeneratedData.model';
 import { Recipe } from '../models/recipe.model';
+import { RecipeRecommendationState } from '../models/recipeRecommendationState.model';
 import { UserPreference } from '../models/userPreference.model';
 import { VideoRecipeSource } from '../models/videoRecipeSource.model';
 import {
   calculateMealTotals,
   calculateNutritionForIngredients,
-  endOfDay,
   resolveNutritionForFood,
   startOfDay
 } from './nutritionService';
@@ -22,6 +22,15 @@ import {
   UnsupportedVideoPlatformError
 } from './videoRecipeExtractor';
 import { buildOwnerQuery, getInventoryOwnerContext } from './foodService';
+import { normalizeFoodText } from '../utils/foodCategoryValidation';
+import {
+  assertSchedulableDateTime,
+  assertSchedulablePlanDate,
+  buildInventoryContextKey,
+  getMealTypeForScheduledTime,
+  planDateFromKey,
+  toPlanDateKey,
+} from '../utils/mealSchedule';
 
 type InventoryPriorityFood = {
   _id: any;
@@ -85,13 +94,15 @@ function normalizeFoodItemId(value: any) {
 }
 
 function normalizeUnit(value?: string) {
-  const unit = String(value || '').trim().toLowerCase();
+  const rawUnit = String(value || '').trim();
+  const unit = rawUnit.toLowerCase();
+  const normalizedText = normalizeFoodText(rawUnit);
   if (['kg', 'kilogram', 'kilograms'].includes(unit)) return 'kg';
   if (['g', 'gram', 'grams'].includes(unit)) return 'g';
   if (['l', 'liter', 'litre', 'liters', 'litres'].includes(unit)) return 'l';
   if (['ml', 'milliliter', 'millilitre', 'milliliters', 'millilitres'].includes(unit)) return 'ml';
-  if (['item', 'piece', 'pieces', 'cai', 'cái', 'qua', 'quả', 'trai', 'trái'].includes(unit)) return 'item';
-  if (['serving', 'portion', 'phan', 'phần'].includes(unit)) return 'serving';
+  if (['item', 'piece', 'pieces', 'cai', 'qua', 'trai'].includes(normalizedText)) return 'item';
+  if (['serving', 'portion', 'phan'].includes(normalizedText)) return 'serving';
   return unit;
 }
 
@@ -178,6 +189,7 @@ async function resolveUsedFoods(meal: any, ownerQuery: any = {}): Promise<any[]>
       categoryId: getCategoryId(food.categoryId),
       quantity: quantityUsed,
       unit,
+      nutritionSnapshot: food.nutritionSnapshot,
     });
 
     resolved.push({
@@ -361,6 +373,9 @@ async function resolveMealPayload(meal: any, ownerQuery: any = {}) {
 async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any = {}) {
   if (!data.planDate) throw new Error('planDate is required');
 
+  const ownerType = data.ownerType === 'HOUSEHOLD' ? 'HOUSEHOLD' : 'USER';
+  const planDateKey = toPlanDateKey(data.planDate);
+
   const meals = Array.isArray(data.meals)
     ? await Promise.all(data.meals.map((meal: any) => resolveMealPayload(meal, ownerQuery)))
     : [];
@@ -368,8 +383,11 @@ async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any =
 
   return {
     userId,
-    householdId: data.householdId,
-    planDate: startOfDay(data.planDate),
+    inventoryOwnerType: ownerType,
+    householdId: ownerType === 'HOUSEHOLD' ? data.householdId : undefined,
+    inventoryContextKey: buildInventoryContextKey(ownerType, data.householdId),
+    planDate: planDateFromKey(planDateKey),
+    planDateKey,
     goal: data.goal,
     totalCalories: totals.totalCalories,
     macroSummary: totals.macroSummary,
@@ -379,21 +397,95 @@ async function buildMealPlanPayload(userId: string, data: any, ownerQuery: any =
   };
 }
 
+function applyPlanDateQuery(filter: any, query: { date?: any; startDate?: any; endDate?: any }) {
+  if (!query.date && !query.startDate && !query.endDate) return;
+
+  const exactKey = query.date ? toPlanDateKey(query.date) : undefined;
+  const startKey = exactKey || (query.startDate ? toPlanDateKey(query.startDate) : undefined);
+  const endKey = exactKey || (query.endDate ? toPlanDateKey(query.endDate) : undefined);
+  if (startKey && endKey && startKey > endKey) {
+    throw new Error('startDate must not be after endDate');
+  }
+
+  const keyCondition: any = exactKey || {};
+  const legacyCondition: any = {};
+  if (!exactKey && startKey) keyCondition.$gte = startKey;
+  if (!exactKey && endKey) keyCondition.$lte = endKey;
+  if (startKey) legacyCondition.$gte = planDateFromKey(startKey);
+  if (endKey) {
+    legacyCondition.$lte = new Date(
+      planDateFromKey(endKey).getTime() + 24 * 60 * 60 * 1000 - 1,
+    );
+  }
+
+  filter.$and = [
+    ...(filter.$and || []),
+    {
+      $or: [
+        { planDateKey: keyCondition },
+        {
+          planDateKey: { $exists: false },
+          planDate: legacyCondition,
+        },
+      ],
+    },
+  ];
+}
+
+function getStoredPlanOwnerQuery(plan: any) {
+  return plan.inventoryOwnerType === 'HOUSEHOLD' && plan.householdId
+    ? { ownerType: 'HOUSEHOLD', householdId: plan.householdId }
+    : { ownerType: 'USER', userId: plan.userId };
+}
+
+async function backfillMealPlanNutrition(plan: any) {
+  const ownerQuery = getStoredPlanOwnerQuery(plan);
+  const resolvedMeals = await Promise.all(
+    (plan.meals || []).map((meal: any) => resolveMealPayload(meal.toObject?.() || meal, ownerQuery)),
+  );
+  const totals = calculateMealTotals(resolvedMeals);
+  const needsUpdate =
+    Number(plan.totalCalories) !== totals.totalCalories ||
+    !hasMacroValue(plan.macroSummary) ||
+    resolvedMeals.some((meal: any, index: number) =>
+      Number(meal.calories) !== Number(plan.meals?.[index]?.calories) ||
+      (hasMacroValue(meal.macroSummary) && !hasMacroValue(plan.meals?.[index]?.macroSummary))
+    );
+
+  if (needsUpdate) {
+    plan.meals = resolvedMeals;
+    plan.totalCalories = totals.totalCalories;
+    plan.macroSummary = totals.macroSummary;
+    await plan.save();
+  }
+
+  return plan;
+}
+
 export async function listMealPlans(userId: string, query: any = {}) {
   const filter: any = { userId };
 
-  if (query.date) {
-    filter.planDate = { $gte: startOfDay(query.date), $lte: endOfDay(query.date) };
-  } else if (query.startDate || query.endDate) {
-    filter.planDate = {};
-    if (query.startDate) filter.planDate.$gte = startOfDay(query.startDate);
-    if (query.endDate) filter.planDate.$lte = endOfDay(query.endDate);
+  if (query.ownerType || query.householdId) {
+    const context = await getInventoryOwnerContext(userId, query.ownerType, query.householdId);
+    if (context.ownerType === 'HOUSEHOLD') {
+      filter.householdId = context.householdId;
+      filter.inventoryOwnerType = { $in: ['HOUSEHOLD', null] };
+    } else {
+      filter.$or = [
+        { inventoryOwnerType: 'USER' },
+        { inventoryOwnerType: { $exists: false }, householdId: { $exists: false } },
+      ];
+    }
   }
 
-  return MealPlan.find(filter)
-    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary')
-    .populate('meals.usedFoods.foodItemId', 'foodName quantity unit status')
-    .sort({ planDate: 1, updatedAt: -1 });
+  applyPlanDateQuery(filter, query);
+
+  const plans = await MealPlan.find(filter).sort({ planDateKey: 1, planDate: 1, updatedAt: -1 });
+  await Promise.all(plans.map(backfillMealPlanNutrition));
+  return MealPlan.populate(plans, [
+    { path: 'meals.recipeId', select: 'recipeName imageUrl calories macroSummary' },
+    { path: 'meals.usedFoods.foodItemId', select: 'foodName quantity unit status' },
+  ]);
 }
 
 export async function getMealPlanById(planId: string, userId: string) {
@@ -405,24 +497,149 @@ export async function getMealPlanById(planId: string, userId: string) {
   return plan;
 }
 
+function getNewOrRescheduledMeals(oldMeals: any[] = [], nextMeals: any[] = []) {
+  const oldCounts = new Map<string, number>();
+  oldMeals.forEach((meal) => {
+    const key = mealFingerprint(meal);
+    oldCounts.set(key, (oldCounts.get(key) || 0) + 1);
+  });
+
+  return nextMeals.filter((meal) => {
+    const key = mealFingerprint(meal);
+    const remaining = oldCounts.get(key) || 0;
+    if (remaining > 0) {
+      oldCounts.set(key, remaining - 1);
+      return false;
+    }
+    return true;
+  });
+}
+
+function assertMealsCanBeScheduled(planDate: string | Date, meals: any[], now = new Date()) {
+  const planDateKey = assertSchedulablePlanDate(planDate, now);
+  meals.forEach((meal) => assertSchedulableDateTime(planDateKey, meal.scheduledTime, now));
+  return planDateKey;
+}
+
+function isDuplicateMealPlanKeyError(error: any) {
+  return Number(error?.code) === 11000
+    && String(error?.message || '').includes('unique_user_inventory_context_plan_day');
+}
+
 export async function createMealPlan(userId: string, data: any) {
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
-  const payload = await buildMealPlanPayload(userId, data, ownerQuery);
+  assertMealsCanBeScheduled(data.planDate, Array.isArray(data.meals) ? data.meals : []);
+  const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  const ownerQuery = buildOwnerQuery(context);
+  const payload = await buildMealPlanPayload(userId, {
+    ...data,
+    ownerType: context.ownerType,
+    householdId: context.householdId,
+  }, ownerQuery);
   payload.meals = await applyMealInventoryTransitions([], payload.meals, ownerQuery);
-  return MealPlan.create(payload);
+  try {
+    return await MealPlan.create(payload);
+  } catch (error) {
+    if (isDuplicateMealPlanKeyError(error)) {
+      throw new Error('A meal plan already exists for this date');
+    }
+    throw error;
+  }
+}
+
+export async function addMealToPlan(userId: string, data: any) {
+  if (!data.planDate) throw new Error('planDate is required');
+  if (!data.meal) throw new Error('meal is required');
+
+  const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  const ownerQuery = buildOwnerQuery(context);
+  const { dateKey, scheduledTime } = assertSchedulableDateTime(
+    data.planDate,
+    data.meal.scheduledTime,
+  );
+  const inventoryContextKey = buildInventoryContextKey(context.ownerType, context.householdId);
+  const meal = await resolveMealPayload({
+    ...data.meal,
+    mealType: getMealTypeForScheduledTime(scheduledTime),
+    scheduledTime,
+    status: 'PENDING',
+    inventoryApplied: false,
+  }, ownerQuery);
+  const mealCalories = roundTwo(Number(meal.calories) || 0);
+  const mealMacros = meal.macroSummary || { protein: 0, carbs: 0, fat: 0 };
+  const filter = { userId, inventoryContextKey, planDateKey: dateKey };
+  const update = {
+    $setOnInsert: {
+      userId,
+      inventoryOwnerType: context.ownerType,
+      householdId: context.ownerType === 'HOUSEHOLD' ? context.householdId : undefined,
+      inventoryContextKey,
+      planDate: planDateFromKey(dateKey),
+      planDateKey: dateKey,
+      goal: data.goal,
+      generatedBy: 'USER',
+      note: data.note,
+    },
+    $push: { meals: meal },
+    $inc: {
+      totalCalories: mealCalories,
+      'macroSummary.protein': roundTwo(Number(mealMacros.protein) || 0),
+      'macroSummary.carbs': roundTwo(Number(mealMacros.carbs) || 0),
+      'macroSummary.fat': roundTwo(Number(mealMacros.fat) || 0),
+    },
+  };
+
+  let plan;
+  try {
+    plan = await MealPlan.findOneAndUpdate(filter, update, {
+      upsert: true,
+      returnDocument: 'after',
+      runValidators: true,
+    });
+  } catch (error) {
+    if (!isDuplicateMealPlanKeyError(error)) throw error;
+    plan = await MealPlan.findOneAndUpdate(filter, {
+      $push: { meals: meal },
+      $inc: update.$inc,
+    }, {
+      returnDocument: 'after',
+      runValidators: true,
+    });
+  }
+
+  if (!plan) throw new Error('Meal plan could not be saved');
+  await plan.populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
+  await plan.populate('meals.usedFoods.foodItemId', 'foodName quantity unit status');
+  return plan;
 }
 
 export async function updateMealPlan(planId: string, userId: string, data: any) {
   const existing = await MealPlan.findOne({ _id: planId, userId });
   if (!existing) throw new Error('Meal plan not found');
 
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const context = await getInventoryOwnerContext(
+    userId,
+    existing.inventoryOwnerType || (existing.householdId ? 'HOUSEHOLD' : 'USER'),
+    existing.householdId?.toString(),
+  );
+  const ownerQuery = buildOwnerQuery(context);
   const payload = await buildMealPlanPayload(userId, {
     ...existing.toObject(),
     ...data,
+    ownerType: context.ownerType,
+    householdId: context.householdId,
     planDate: data.planDate || existing.planDate,
     meals: data.meals || existing.meals
   }, ownerQuery);
+
+  const existingDateKey = existing.planDateKey || toPlanDateKey(existing.planDate);
+  if (payload.planDateKey !== existingDateKey) {
+    assertMealsCanBeScheduled(payload.planDateKey, payload.meals);
+  } else {
+    const addedOrRescheduledMeals = getNewOrRescheduledMeals(existing.meals || [], payload.meals);
+    if (addedOrRescheduledMeals.length) {
+      assertMealsCanBeScheduled(payload.planDateKey, addedOrRescheduledMeals);
+    }
+  }
 
   payload.meals = await applyMealInventoryTransitions(existing.meals || [], payload.meals, ownerQuery);
   const totals = calculateMealTotals(payload.meals);
@@ -438,23 +655,28 @@ export async function deleteMealPlan(planId: string, userId: string) {
   const existing = await MealPlan.findOne({ _id: planId, userId });
   if (!existing) throw new Error('Meal plan not found');
 
-  const ownerQuery = buildOwnerQuery(await getInventoryOwnerContext(userId));
+  const context = await getInventoryOwnerContext(
+    userId,
+    existing.inventoryOwnerType || (existing.householdId ? 'HOUSEHOLD' : 'USER'),
+    existing.householdId?.toString(),
+  );
+  const ownerQuery = buildOwnerQuery(context);
   await applyMealInventoryTransitions(existing.meals || [], [], ownerQuery);
   await MealPlan.deleteOne({ _id: planId, userId });
   return { message: 'Meal plan deleted successfully' };
 }
 
 export async function getMealPlanSummary(userId: string, date: string | Date) {
-  const plans = await MealPlan.find({
-    userId,
-    planDate: { $gte: startOfDay(date), $lte: endOfDay(date) }
-  });
+  const filter: any = { userId };
+  applyPlanDateQuery(filter, { date });
+  const plans = await MealPlan.find(filter);
 
   const meals = plans.flatMap((plan) => plan.meals || []);
   const totals = calculateMealTotals(meals);
 
   return {
-    date: startOfDay(date),
+    date: planDateFromKey(toPlanDateKey(date)),
+    planDateKey: toPlanDateKey(date),
     mealCount: meals.length,
     ...totals
   };
@@ -467,7 +689,7 @@ function expiryPriority(expiryDate: Date) {
 }
 
 function normalize(value: string) {
-  return value.trim().toLowerCase();
+  return normalizeFoodText(value || '');
 }
 
 function hasMacroValue(macroSummary: any) {
@@ -539,21 +761,61 @@ function recipeInventoryScore(recipe: any, foods: any[]) {
   };
 }
 
+function hasFoodTerm(text: string, terms: string[]) {
+  return terms.some((term) => {
+    const normalizedTerm = normalizeFoodText(term);
+    if (!normalizedTerm) return false;
+    const escaped = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(text);
+  });
+}
+
+function isProteinFoodText(text: string) {
+  return hasFoodTerm(text, [
+    'thịt',
+    'thịt bò',
+    'thịt gà',
+    'thịt heo',
+    'thịt lợn',
+    'gà',
+    'bò',
+    'heo',
+    'lợn',
+    'tôm',
+    'trứng',
+    'egg',
+    'chicken',
+    'beef',
+    'pork',
+    'fish',
+    'shrimp',
+    'tofu',
+    'đậu hũ',
+    'cá hồi',
+    'cá thu',
+    'cá basa',
+    'cá ngừ',
+    'cá lóc',
+    'cá rô',
+    'cá chép'
+  ]);
+}
+
 function getFoodGroup(food: InventoryPriorityFood) {
   const text = normalize(`${food.foodName} ${food.categoryName || ''}`);
-  if (/gà|bo|bò|heo|lợn|thịt|cá|tôm|trứng|egg|chicken|beef|pork|fish|shrimp|tofu|đậu/.test(text)) {
-    return 'protein';
-  }
-  if (/cơm|gạo|bún|mì|noodle|rice|pasta|khoai|bread|bánh mì|yến mạch|oat/.test(text)) {
-    return 'carb';
-  }
-  if (/rau|cải|xà lách|cà rốt|cà chua|dưa leo|bí|nấm|vegetable|salad|lettuce|tomato|carrot|mushroom/.test(text)) {
+  if (hasFoodTerm(text, ['rau', 'cải', 'xà lách', 'cà rốt', 'cà chua', 'dưa leo', 'dưa chuột', 'bí', 'nấm', 'vegetable', 'salad', 'lettuce', 'tomato', 'carrot', 'mushroom'])) {
     return 'vegetable';
   }
-  if (/chuối|táo|cam|dâu|xoài|fruit|banana|apple|orange|berry|mango/.test(text)) {
+  if (hasFoodTerm(text, ['chuối', 'táo', 'cam', 'dâu', 'xoài', 'nhãn', 'dưa hấu', 'fruit', 'banana', 'apple', 'orange', 'berry', 'mango'])) {
     return 'fruit';
   }
-  if (/sữa|yogurt|yaourt|phô mai|milk|cheese/.test(text)) {
+  if (isProteinFoodText(text)) {
+    return 'protein';
+  }
+  if (hasFoodTerm(text, ['cơm', 'gạo', 'bún', 'mì', 'noodle', 'rice', 'pasta', 'khoai', 'bread', 'bánh mì', 'yến mạch', 'oat'])) {
+    return 'carb';
+  }
+  if (hasFoodTerm(text, ['sữa', 'yogurt', 'yaourt', 'phô mai', 'milk', 'cheese'])) {
     return 'dairy';
   }
   return 'other';
@@ -593,6 +855,152 @@ function roundQuantity(value: number) {
   return Math.round(quantity * 10) / 10;
 }
 
+function randomInt(min: number, max: number) {
+  const lower = Math.ceil(min);
+  const upper = Math.floor(max);
+  if (upper <= lower) return lower;
+  return lower + Math.floor(Math.random() * (upper - lower + 1));
+}
+
+const BASIC_PANTRY_INGREDIENTS = new Set([
+  'muoi',
+  'duong',
+  'tieu',
+  'hat nem',
+  'bot ngot',
+  'mi chinh',
+  'dau an',
+  'dau olive',
+  'nuoc mam',
+  'nuoc tuong',
+  'xi dau',
+  'gia vi',
+  'hanh ngo',
+  'hanh la',
+  'rau thom',
+  'toi',
+  'ot',
+  'chanh'
+]);
+
+function isBasicPantryIngredient(name?: string) {
+  const normalized = normalizeFoodText(name || '');
+  if (!normalized) return false;
+  if (BASIC_PANTRY_INGREDIENTS.has(normalized)) return true;
+  return /^(muoi|duong|tieu|hat nem|bot ngot|mi chinh|dau an|dau olive|nuoc mam|nuoc tuong|xi dau|gia vi|hanh ngo|hanh la|rau thom|toi|ot|chanh)(\s|$)/.test(normalized);
+}
+
+function inferRecipeUnit(ingredientName: string, unit?: string, matchedFood?: InventoryPriorityFood) {
+  const normalizedUnit = normalizeUnit(unit);
+  const normalizedName = normalizeFoodText(ingredientName);
+  const foodUnit = matchedFood?.unit;
+
+  if (foodUnit) {
+    const normalizedFoodUnit = normalizeUnit(foodUnit);
+    if (['kg', 'g', 'ml', 'l'].includes(normalizedFoodUnit)) return normalizedFoodUnit;
+    if (normalizedFoodUnit === 'item') {
+      if (/trung|egg|tao|chuoi|cam|quyt|xoai|chanh|ca chua/.test(normalizedName)) return 'quả';
+      return 'cái';
+    }
+  }
+  if (['kg', 'g', 'ml', 'l'].includes(normalizedUnit)) return normalizedUnit;
+  if (['qua', 'trai'].includes(normalizedUnit)) return 'quả';
+  if (['cai', 'item', 'piece'].includes(normalizedUnit)) {
+    if (/trung|egg|tao|chuoi|cam|quyt|xoai|chanh|ca chua/.test(normalizedName)) return 'quả';
+    return 'cái';
+  }
+  if (/sua|milk|nuoc|juice|soup|canh/.test(normalizedName)) return 'ml';
+  if (/trung|egg|tao|chuoi|cam|quyt|xoai|chanh|ca chua/.test(normalizedName)) return 'quả';
+  return 'g';
+}
+
+function normalizeRecipeQuantity(quantity: number, unit: string, ingredientName = '') {
+  const value = Number(quantity) > 0 ? Number(quantity) : 1;
+  const normalizedUnit = normalizeUnit(unit);
+  const normalizedName = normalizeFoodText(ingredientName);
+
+  if (normalizedUnit === 'kg') return Math.max(0.05, Math.round(value * 20) / 20);
+  if (normalizedUnit === 'g') {
+    const base = value < 25 ? 25 : Math.round(value / 25) * 25;
+    return Math.min(Math.max(base, 25), isProteinFoodText(normalizedName) ? 250 : 300);
+  }
+  if (normalizedUnit === 'l') return Math.max(0.05, Math.round(value * 20) / 20);
+  if (normalizedUnit === 'ml') {
+    const base = value < 25 ? 25 : Math.round(value / 25) * 25;
+    return Math.min(Math.max(base, 25), 500);
+  }
+  if (normalizedUnit === 'item' || ['qua', 'cai'].includes(normalizeFoodText(unit))) {
+    return Math.max(1, Math.round(value));
+  }
+  return Math.max(1, Math.round(value));
+}
+
+function estimateIngredientNutrition(ingredient: any) {
+  const name = normalizeFoodText(ingredient.ingredientName || ingredient.foodName || '');
+  const unit = normalizeUnit(ingredient.unit);
+  const rawQuantity = Number(ingredient.quantity) || 0;
+  let grams = rawQuantity;
+
+  if (unit === 'kg') grams = rawQuantity * 1000;
+  else if (unit === 'g') grams = rawQuantity;
+  else if (unit === 'l') grams = rawQuantity * 1000;
+  else if (unit === 'ml') grams = rawQuantity;
+  else if (unit === 'item' || ['qua', 'cai'].includes(normalizeFoodText(ingredient.unit))) {
+    grams = /trung|egg/.test(name) ? rawQuantity * 55 : rawQuantity * 100;
+  } else {
+    grams = rawQuantity * 100;
+  }
+
+  const per100 = isProteinFoodText(name)
+    ? { calories: 170, protein: 21, carbs: 0, fat: 8 }
+    : /gao|com|bun|mi|pho|khoai|bread|rice|noodle|oat/.test(name)
+      ? { calories: 130, protein: 3, carbs: 28, fat: 1 }
+      : /sua|yogurt|yaourt|milk|cheese/.test(name)
+        ? { calories: 65, protein: 3.5, carbs: 5, fat: 3 }
+        : /tao|chuoi|cam|xoai|nhan|fruit|banana|apple|orange|mango/.test(name)
+          ? { calories: 60, protein: 0.8, carbs: 14, fat: 0.2 }
+          : { calories: 35, protein: 1.5, carbs: 7, fat: 0.3 };
+
+  const factor = grams / 100;
+  return {
+    calories: roundTwo(per100.calories * factor),
+    macroSummary: {
+      protein: roundTwo(per100.protein * factor),
+      carbs: roundTwo(per100.carbs * factor),
+      fat: roundTwo(per100.fat * factor)
+    }
+  };
+}
+
+async function calculateRecipeNutrition(ingredients: any[] = []) {
+  const nutrition = await calculateNutritionForIngredients(ingredients);
+  const unmatched = Array.isArray((nutrition as any).unmatched) ? (nutrition as any).unmatched : [];
+  if (!unmatched.length) return nutrition;
+
+  const estimated = unmatched.reduce(
+    (acc: any, ingredient: any) => {
+      const item = estimateIngredientNutrition(ingredient);
+      acc.calories += item.calories;
+      acc.macroSummary = addMacros(acc.macroSummary, item.macroSummary);
+      return acc;
+    },
+    {
+      calories: Number(nutrition.calories) || 0,
+      macroSummary: nutrition.macroSummary || { protein: 0, carbs: 0, fat: 0 }
+    }
+  );
+
+  return {
+    ...nutrition,
+    calories: roundTwo(estimated.calories),
+    macroSummary: {
+      protein: roundTwo(estimated.macroSummary.protein),
+      carbs: roundTwo(estimated.macroSummary.carbs),
+      fat: roundTwo(estimated.macroSummary.fat)
+    }
+  };
+}
+
 function allocateCaloriesToMealTypes(
   mealTypes: string[],
   calorieMin: number,
@@ -601,19 +1009,65 @@ function allocateCaloriesToMealTypes(
 ): MealCalorieAllocation[] {
   const count = Math.max(1, mealTypes.length);
   const finiteMax = Number.isFinite(calorieMax);
-  const baseMin = Math.floor(calorieMin / count);
-  const minRemainder = calorieMin - baseMin * count;
-  const baseMax = finiteMax ? Math.floor(calorieMax / count) : Infinity;
-  const maxRemainder = finiteMax ? calorieMax - baseMax * count : 0;
-  const baseTarget = Math.floor(calorieTarget / count);
-  const targetRemainder = calorieTarget - baseTarget * count;
-
-  return mealTypes.map((mealType, index) => ({
+  const baseMin = Math.floor(Math.max(0, calorieMin) / count);
+  const minRemainder = Math.max(0, calorieMin) - baseMin * count;
+  const baseMax = finiteMax ? Math.floor(Math.max(calorieMax, calorieMin || calorieTarget) / count) : Infinity;
+  const maxRemainder = finiteMax ? Math.max(calorieMax, calorieMin || calorieTarget) - baseMax * count : 0;
+  const minSlots = mealTypes.map((mealType, index) => ({
     mealType,
     min: baseMin + (index < minRemainder ? 1 : 0),
-    max: finiteMax ? baseMax + (index < maxRemainder ? 1 : 0) : Infinity,
-    target: baseTarget + (index < targetRemainder ? 1 : 0)
+    max: finiteMax ? baseMax + (index < maxRemainder ? 1 : 0) : Infinity
   }));
+  const totalMin = minSlots.reduce((sum, item) => sum + item.min, 0);
+  const totalMax = finiteMax
+    ? minSlots.reduce((sum, item) => sum + Number(item.max), 0)
+    : Math.max(totalMin + count * 250, calorieTarget);
+  const totalTarget = finiteMax && totalMax > totalMin
+    ? randomInt(totalMin, totalMax)
+    : randomInt(Math.max(0, Math.round(calorieTarget * 0.9)), Math.max(1, Math.round(calorieTarget * 1.1)));
+  let remaining = Math.max(0, totalTarget - totalMin);
+  const weights = mealTypes.map(() => 0.7 + Math.random() * 0.8);
+  const weightSum = weights.reduce((sum, value) => sum + value, 0) || 1;
+  const targets = minSlots.map((slot, index) => {
+    const capacity = Number.isFinite(slot.max) ? Math.max(0, Number(slot.max) - slot.min) : remaining;
+    const proposed = Math.round((totalTarget - totalMin) * (weights[index] / weightSum));
+    const extra = Math.min(capacity, proposed);
+    remaining -= extra;
+    return slot.min + extra;
+  });
+
+  let guard = 0;
+  while (remaining > 0 && guard < 100) {
+    const index = randomInt(0, targets.length - 1);
+    const capacity = Number.isFinite(minSlots[index].max)
+      ? Number(minSlots[index].max) - targets[index]
+      : remaining;
+    if (capacity > 0) {
+      const extra = Math.min(remaining, capacity, randomInt(1, Math.max(1, Math.min(80, capacity))));
+      targets[index] += extra;
+      remaining -= extra;
+    }
+    guard += 1;
+  }
+
+  return minSlots.map((slot, index) => ({
+    mealType: slot.mealType,
+    min: slot.min,
+    max: slot.max,
+    target: targets[index]
+  }));
+}
+
+function randomizeRecipeAllocation(allocation: MealCalorieAllocation): MealCalorieAllocation {
+  const minimum = Math.max(1, Math.ceil(allocation.min));
+  const maximum = Number.isFinite(allocation.max)
+    ? Math.max(minimum, Math.floor(allocation.max))
+    : Math.max(minimum, Math.round(allocation.target * 1.15));
+
+  return {
+    ...allocation,
+    target: randomInt(minimum, maximum)
+  };
 }
 
 function findAllocationForCalories(
@@ -650,12 +1104,10 @@ function findMatchingFood(ingredient: any, foods: InventoryPriorityFood[]) {
     if (!matchesIngredient(food.foodName, ingredient.ingredientName)) return false;
     const requiredQty = Number(ingredient.quantity) || 0;
     const availableQty = Number(food.quantity) || 0;
-    const foodUnit = normalize(food.unit || '');
-    const ingredientUnit = normalize(ingredient.unit || '');
-    const unitMatches = !foodUnit || !ingredientUnit || foodUnit === ingredientUnit;
-    if (!unitMatches) return false;
+    const convertedRequired = convertQuantity(requiredQty, ingredient.unit, food.unit);
+    if (convertedRequired === null) return false;
     if (requiredQty <= 0) return availableQty > 0;
-    return availableQty >= requiredQty;
+    return availableQty >= convertedRequired;
   });
 }
 
@@ -667,7 +1119,7 @@ function analyzeRecipeAvailability(
   const missingIngredients: RecipeAvailabilityAnalysis['missingIngredients'] = [];
 
   ingredients
-    .filter((ingredient) => ingredient.isRequired !== false)
+    .filter((ingredient) => ingredient.isRequired !== false && !isBasicPantryIngredient(ingredient.ingredientName))
     .forEach((ingredient) => {
       const matchedFood = findMatchingFood(ingredient, foods);
       if (matchedFood) {
@@ -676,7 +1128,7 @@ function analyzeRecipeAvailability(
         missingIngredients.push({
           ingredientName: ingredient.ingredientName,
           quantity: Number(ingredient.quantity) || 1,
-          unit: ingredient.unit || 'serving',
+          unit: ingredient.unit || 'g',
           categoryId: ingredient.categoryId,
           categoryName: ingredient.categoryName
         });
@@ -722,11 +1174,12 @@ function buildRecommendation(recipe: any, metadata: any) {
 }
 
 function buildIngredientFromFood(food: InventoryPriorityFood) {
+  const unit = inferRecipeUnit(food.foodName, food.unit, food);
   return {
     ingredientName: food.foodName,
     categoryId: food.categoryId,
-    quantity: getPortionQuantity(food),
-    unit: food.unit || 'serving',
+    quantity: normalizeRecipeQuantity(getPortionQuantity(food), unit, food.foodName),
+    unit,
     isRequired: true
   };
 }
@@ -1095,11 +1548,11 @@ function buildFallbackRecipeDrafts(
         availabilityStatus: 'MISSING_INGREDIENTS',
         ingredients: [
           buildIngredientFromFood(baseFood),
-          { ingredientName: extraName, quantity: 1, unit: 'serving', isRequired: true }
+          { ingredientName: extraName, quantity: getFoodGroup(baseFood) === 'fruit' ? 100 : 150, unit: 'g', isRequired: true }
         ],
         cookingSteps: [
           `Sơ chế ${baseFood.foodName}.`,
-          `Chuẩn bị ${extraName} và gia vị vừa ăn.`,
+          `Chuẩn bị ${extraName}.`,
           'Chế biến nhanh, trình bày gọn và dùng ngay.'
         ],
         cookingTime: 15,
@@ -1137,7 +1590,9 @@ function sanitizeDraftIngredients(
     : fallbackFoods.map(buildIngredientFromFood);
   const rawIngredients = [...baseIngredients, ...missingIngredients].filter((ingredient, index, all) => {
     const name = normalize(String(ingredient.ingredientName || ''));
-    return name && all.findIndex((item) => normalize(String(item.ingredientName || '')) === name) === index;
+    return name &&
+      !isBasicPantryIngredient(ingredient.ingredientName) &&
+      all.findIndex((item) => normalize(String(item.ingredientName || '')) === name) === index;
   });
 
   return rawIngredients
@@ -1145,12 +1600,13 @@ function sanitizeDraftIngredients(
       const ingredientName = String(ingredient.ingredientName || '').trim();
       if (!ingredientName) return null;
       const matchedFood = priorityFoods.find((food) => matchesIngredient(food.foodName, ingredientName));
+      const unit = inferRecipeUnit(ingredientName, ingredient.unit, matchedFood);
       return {
         ingredientName: matchedFood?.foodName || ingredientName,
         categoryId: matchedFood?.categoryId,
         categoryName: (ingredient as any).categoryName,
-        quantity: Number(ingredient.quantity) > 0 ? roundQuantity(Number(ingredient.quantity)) : 1,
-        unit: ingredient.unit || matchedFood?.unit || 'serving',
+        quantity: normalizeRecipeQuantity(Number(ingredient.quantity) > 0 ? Number(ingredient.quantity) : 1, unit, ingredientName),
+        unit,
         isRequired: ingredient.isRequired !== false
       };
     })
@@ -1164,7 +1620,7 @@ async function fitIngredientsToAllocation(
   availabilityStatus: AvailabilityStatus
 ) {
   let currentIngredients = ingredients.map((ingredient) => ({ ...ingredient }));
-  let nutrition = await calculateNutritionForIngredients(currentIngredients);
+  let nutrition = await calculateRecipeNutrition(currentIngredients);
   const calories = Number(nutrition.calories) || 0;
 
   if (!calories || isWithinCalorieRange(calories, allocation.min, allocation.max)) {
@@ -1176,7 +1632,7 @@ async function fitIngredientsToAllocation(
 
   currentIngredients = currentIngredients.map((ingredient) => {
     const matchedFood = findMatchingFood(ingredient, priorityFoods);
-    const scaledQuantity = roundQuantity((Number(ingredient.quantity) || 1) * scale);
+    const scaledQuantity = normalizeRecipeQuantity((Number(ingredient.quantity) || 1) * scale, ingredient.unit, ingredient.ingredientName);
     const cappedQuantity =
       availabilityStatus === 'ENOUGH_INGREDIENTS' && matchedFood && normalize(matchedFood.unit) === normalize(ingredient.unit)
         ? Math.min(scaledQuantity, Number(matchedFood.quantity) || scaledQuantity)
@@ -1188,7 +1644,7 @@ async function fitIngredientsToAllocation(
     };
   });
 
-  nutrition = await calculateNutritionForIngredients(currentIngredients);
+  nutrition = await calculateRecipeNutrition(currentIngredients);
   return { ingredients: currentIngredients, nutrition };
 }
 
@@ -1212,7 +1668,7 @@ function dedupeRecommendations(items: any[]) {
 
 async function buildGeneratedRecipe(userId: string, foods: InventoryPriorityFood[], mealType: string, data: any) {
   const ingredients = foods.map(buildIngredientFromFood);
-  const nutrition = await calculateNutritionForIngredients(ingredients);
+  const nutrition = await calculateRecipeNutrition(ingredients);
   const recipeName = buildSmartFallbackRecipeName(foods, mealType);
   const cookingSteps = buildCookingSteps(recipeName, foods);
   const priorityReasons = buildComboPriorityReasons(foods, Number(data.calorieTarget || 0), data.weather);
@@ -1397,9 +1853,9 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
       ? preference.defaultMealTypes
       : ['BREAKFAST', 'LUNCH', 'DINNER'];
 
+  const inventoryContext = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
   const foods = await FoodItem.find({
-    userId,
-    ownerType: 'USER',
+    ...buildOwnerQuery(inventoryContext),
     isDeleted: false,
     isConsumed: false,
     quantity: { $gt: 0 },
@@ -1414,7 +1870,8 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
         foodName: food.foodName,
         categoryId: getCategoryId(food.categoryId),
         quantity: food.quantity,
-        unit: food.unit
+        unit: food.unit,
+        nutritionSnapshot: food.nutritionSnapshot,
       });
 
       return {
@@ -1446,13 +1903,24 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     calorieMax,
     calorieTarget
   );
-  const recipes = await Recipe.find({
-    isActive: true,
-    $or: [
-      { sourceType: 'SYSTEM' },
-      { createdBy: userId }
-    ]
-  });
+  const generatedCalorieTarget = calorieAllocations.reduce(
+    (sum, allocation) => sum + (Number(allocation.target) || 0),
+    0
+  );
+  const [recipes, dismissedRecipeIds] = await Promise.all([
+    Recipe.find({
+      isActive: true,
+      $or: [
+        { sourceType: 'SYSTEM' },
+        { createdBy: userId }
+      ]
+    }),
+    RecipeRecommendationState.distinct('recipeId', { userId, status: 'DISMISSED' }),
+  ]);
+  const dismissedRecipeIdSet = new Set(dismissedRecipeIds.map((id) => String(id)));
+  const recommendableRecipes = recipes.filter(
+    (recipe) => !dismissedRecipeIdSet.has(String(recipe._id)),
+  );
   const avoidRecipes = Array.isArray(data.avoidRecipes) ? data.avoidRecipes : [];
   const recipeReferences = [...avoidRecipes, ...recipes];
   const aiDrafts = await generateAiRecipeDrafts({
@@ -1461,7 +1929,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     preference,
     calorieMin,
     calorieMax,
-    calorieTarget,
+    calorieTarget: generatedCalorieTarget,
     bmiProfile: data.bmiProfile,
     existingRecipes: recipeReferences,
     weather: data.weather
@@ -1469,7 +1937,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
   const fallbackDrafts = buildFallbackRecipeDrafts(
     priorityFoods,
     calorieAllocations,
-    calorieTarget,
+    generatedCalorieTarget,
     data.weather,
     recipeReferences
   );
@@ -1491,16 +1959,21 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
 
     for (const draft of mealDrafts) {
       const draftKey = `${normalize(draft.recipeName || '')}:${buildIngredientSignature(draft.ingredients || [])}:${buildStepSignature(draft.steps || draft.cookingSteps || [])}`;
+      const recipeAllocation = randomizeRecipeAllocation(allocation);
       const recommendation = await buildGeneratedRecipeFromDraft(
         userId,
         { ...draft, mealType: allocation.mealType },
-        allocation,
+        recipeAllocation,
         priorityFoods,
         {
           ...data,
-          calorieTarget
+          calorieTarget: generatedCalorieTarget
         }
       );
+      if (dismissedRecipeIdSet.has(String(recommendation.recipe?._id))) {
+        usedDraftKeys.add(draftKey);
+        continue;
+      }
       const recipeCalories = Number(recommendation.recipe?.calories) || 0;
       if (
         recipeCalories > 0 &&
@@ -1527,7 +2000,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     }
   }
 
-  const scoredRecipes = recipes
+  const scoredRecipes = recommendableRecipes
     .map((recipe) => {
       const scoring = recipeInventoryScore(recipe, foods);
       const availability = analyzeRecipeAvailability(recipe.ingredients || [], priorityFoods);
@@ -1577,7 +2050,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
     inventoryPriority: priorityFoods,
     recommendations: recommendations.slice(0, 12),
     planDate,
-    calorieTarget,
+    calorieTarget: generatedCalorieTarget,
     calorieRange: { min: calorieMin, max: calorieMax },
     mealCalorieAllocations: calorieAllocations,
     generatedCaloriesTotal: generatedRecommendations

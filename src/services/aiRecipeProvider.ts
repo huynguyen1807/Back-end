@@ -184,7 +184,11 @@ Hard rules:
 - Rotate cooking techniques across the list: salad, soup, stir-fry, braise, pan-sear, porridge, rice bowl, noodle bowl, smoothie, yogurt bowl, rolls.
 - For ENOUGH_INGREDIENTS recipes, only use available inventory ingredients and do not require missing items.
 - For MISSING_INGREDIENTS recipes, you may add reasonable missing ingredients, but include all ingredients in the recipe.
+- Missing ingredients must be main foods only. Do not list pantry/basic seasonings such as salt, sugar, pepper, cooking oil, fish sauce, soy sauce, garlic, chili, herbs, scallion/cilantro, or generic "gia vị" as missing ingredients.
+- Use practical Vietnamese units only: g, kg, ml, l, quả, cái. Do not use "item", "serving", "portion", or strange precise quantities.
+- Round quantities naturally, e.g. 50g, 75g, 100g, 150g, 200g, 250ml, 1 quả. Avoid odd quantities like 62g.
 - Calories must target the provided meal slot allocation. The total selected slots should stay in the daily range ${input.calorieMin}-${Number.isFinite(input.calorieMax) ? input.calorieMax : 'unlimited'} kcal.
+- Calories and macroSummary are estimates only; backend will recalculate from ingredients, so make ingredient quantities realistic.
 - Prefer near-expiry foods, user preferences, and balanced macros.
 - Use BMI context when available. If BMI is not provided, assume a generally healthy adult and avoid extreme diet advice.
 - Avoid recipes already listed in Existing recipe references. Change the real dish type, core ingredients, and cooking technique instead of only renaming.
@@ -217,10 +221,10 @@ Return a JSON array with 3 diverse recipes per meal slot if possible. Each objec
   "calories": estimated recipe kcal,
   "macroSummary": { "protein": grams, "carbs": grams, "fat": grams },
   "ingredients": [
-    { "ingredientName": "name", "quantity": number, "unit": "g|ml|item|serving", "isRequired": true }
+    { "ingredientName": "name", "quantity": number, "unit": "g|kg|ml|l|quả|cái", "isRequired": true }
   ],
   "missingIngredients": [
-    { "ingredientName": "name", "quantity": number, "unit": "g|ml|item|serving", "categoryName": "optional category" }
+    { "ingredientName": "main missing food only", "quantity": number, "unit": "g|kg|ml|l|quả|cái", "categoryName": "optional category" }
   ],
   "steps": ["step 1", "step 2", "step 3"],
   "cookingTime": number,
