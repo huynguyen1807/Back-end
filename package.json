@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@payos/node": "2.0.5",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.5",

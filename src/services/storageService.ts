@@ -1,7 +1,9 @@
+import { assertHouseholdInventoryAccess, HouseholdAccessError } from './householdAccessService';
 import { StorageLocation } from '../models/storageLocation.model';
 import { StorageRule } from '../models/storageRule.model';
 import { FoodItem } from '../models/foodItem.model';
 import { HouseholdMember } from '../models/householdMember.model';
+import { getHouseholdEntitlement } from './subscriptionService';
 
 export async function getStorageOwnerContext(userId: string, requestedOwnerType?: string, requestedHouseholdId?: string) {
   if (requestedOwnerType === 'HOUSEHOLD' && requestedHouseholdId) {
@@ -9,7 +11,7 @@ export async function getStorageOwnerContext(userId: string, requestedOwnerType?
     if (membership) {
       return { ownerType: 'HOUSEHOLD', householdId: requestedHouseholdId, userId };
     }
-    throw new Error('You are not a member of this household');
+    throw new HouseholdAccessError('You are not a member of this household');
   } else if (requestedOwnerType === 'USER') {
     return { ownerType: 'USER', userId };
   }
@@ -39,6 +41,7 @@ function buildOwnerQuery(context: any) {
 // ─── GET storage locations của user ──────────────────────────────────────────
 export async function getStorageLocations(userId: string, ownerType?: string, householdId?: string) {
   const context = await getStorageOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   return StorageLocation.find({ ...buildOwnerQuery(context), isActive: true }).sort({ isDefault: -1, storageName: 1 });
 }
 
@@ -46,8 +49,19 @@ export async function getStorageLocations(userId: string, ownerType?: string, ho
 export async function createStorageLocation(userId: string, data: any, ownerType?: string, householdId?: string) {
   const { storageName, storageType, description, isDefault } = data;
   const context = await getStorageOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
 
   if (!storageName || !storageType) throw new Error('storageName and storageType are required');
+
+  if (context.ownerType === 'HOUSEHOLD') {
+    const entitlement = await getHouseholdEntitlement(String(context.householdId));
+    const count = await StorageLocation.countDocuments({ ...buildOwnerQuery(context), isActive: true });
+    const limit = entitlement.limits?.maxStorageLocations;
+    if (!Number.isInteger(limit) || limit < 0 || count >= limit
+      || (count >= 1 && !entitlement.capabilities.multiStorageEnabled)) {
+      throw new HouseholdAccessError('Family plan storage limit reached');
+    }
+  }
 
   // Nếu đặt default, unset default cũ
   if (isDefault) {
@@ -67,8 +81,13 @@ export async function createStorageLocation(userId: string, data: any, ownerType
 // ─── UPDATE storage location ──────────────────────────────────────────────────
 export async function updateStorageLocation(locationId: string, userId: string, data: any, ownerType?: string, householdId?: string) {
   const context = await getStorageOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
   const loc = await StorageLocation.findOne({ _id: locationId, ...buildOwnerQuery(context), isActive: true });
   if (!loc) throw new Error('Storage location not found');
+
+  if (Object.keys(data).some((key) => key.startsWith('$') || ['ownerType', 'userId', 'householdId'].includes(key.split('.')[0]))) {
+    throw new HouseholdAccessError('Storage ownership cannot be changed through this endpoint');
+  }
 
   if (data.isDefault) {
     await StorageLocation.updateMany(buildOwnerQuery(context), { isDefault: false });
@@ -80,6 +99,7 @@ export async function updateStorageLocation(locationId: string, userId: string, 
 // ─── DELETE storage location ──────────────────────────────────────────────────
 export async function deleteStorageLocation(locationId: string, userId: string, ownerType?: string, householdId?: string) {
   const context = await getStorageOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
   const loc = await StorageLocation.findOne({ _id: locationId, ...buildOwnerQuery(context), isActive: true });
   if (!loc) throw new Error('Storage location not found');
 
@@ -102,6 +122,7 @@ export async function deleteStorageLocation(locationId: string, userId: string, 
 // Gợi ý vị trí lưu trữ tốt nhất cho 1 food item dựa vào categoryId
 export async function getStorageSuggestion(userId: string, categoryId: string, ownerType?: string, householdId?: string) {
   const context = await getStorageOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   // Lấy tất cả storage rules của category này, ưu tiên rule có priority cao nhất
   const rules = await StorageRule.find({ categoryId, status: 'OFFICIAL' })
     .populate('categoryId', 'categoryName')

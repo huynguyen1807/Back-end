@@ -1,3 +1,4 @@
+import { HouseholdAccessError } from '../services/householdAccessService';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/authMiddleware';
 import {
@@ -19,6 +20,10 @@ export const listFoods = async (req: AuthRequest, res: Response) => {
     const items = await getFoodItems(userId, filter as string, ownerType as string, householdId as string);
     res.json({ success: true, data: items });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -30,6 +35,10 @@ export const foodSummary = async (req: AuthRequest, res: Response) => {
     const summary = await getFoodSummary(userId, ownerType as string, householdId as string);
     res.json({ success: true, data: summary });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -51,6 +60,10 @@ export const getFood = async (req: AuthRequest, res: Response) => {
     const item = await getFoodItemById(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, data: item });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message === 'Food item not found' ? 404 : 500;
     res.status(status).json({ success: false, message: error.message });
   }
@@ -63,6 +76,10 @@ export const createFood = async (req: AuthRequest, res: Response) => {
     const item = await createFoodItem(userId, req.body, ownerType as string, householdId as string);
     res.status(201).json({ success: true, data: item });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message === 'Missing required fields'
       || error.message === 'Category not found'
       || error.message.startsWith('Vị trí lưu trữ')
@@ -79,6 +96,10 @@ export const updateFood = async (req: AuthRequest, res: Response) => {
     const item = await updateFoodItem(req.params.id as string, userId, req.body, ownerType as string, householdId as string);
     res.json({ success: true, data: item });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message === 'Food item not found'
       ? 404
       : error.message === 'Category not found' || error.message.startsWith('Vị trí lưu trữ')
@@ -95,6 +116,10 @@ export const deleteFood = async (req: AuthRequest, res: Response) => {
     const result = await deleteFoodItem(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, ...result });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message === 'Food item not found' ? 404 : 500;
     res.status(status).json({ success: false, message: error.message });
   }
@@ -107,6 +132,10 @@ export const consumeFood = async (req: AuthRequest, res: Response) => {
     const result = await markFoodConsumed(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, ...result });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message.includes('not found') ? 404 : 500;
     res.status(status).json({ success: false, message: error.message });
   }

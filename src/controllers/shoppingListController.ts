@@ -1,6 +1,7 @@
 import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/authMiddleware';
+import { FamilySubscriptionError } from '../services/subscriptionService';
 import {
   addMissingIngredientsToShoppingList,
   addShoppingListItem,
@@ -9,6 +10,7 @@ import {
   getShoppingListById,
   getShoppingLists,
   removeShoppingListItem,
+  ShoppingListConflictError,
   updateShoppingListItem
 } from '../services/shoppingListService';
 
@@ -35,7 +37,7 @@ function getStatusCode(message: string) {
 
 function handleShoppingListError(res: Response, error: any) {
   const message = error.message ?? 'Server error';
-  res.status(getStatusCode(message)).json({ success: false, message });
+  res.status(error instanceof ShoppingListConflictError ? 409 : error instanceof FamilySubscriptionError ? 403 : getStatusCode(message)).json({ success: false, message });
 }
 
 export const listShoppingListsHandler = async (req: AuthRequest, res: Response) => {

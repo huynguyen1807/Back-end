@@ -6,6 +6,7 @@ const householdSchema = new Schema(
   {
     householdName: { type: String, required: true, trim: true },
     ownerId: { type: objectId, ref: 'User', required: true, index: true },
+    membershipRevision: { type: Number, default: 0 },
     planType: { type: String, enum: ['FREE', 'PREMIUM'], default: 'FREE' },
     status: { type: String, enum: ['ACTIVE', 'INACTIVE'], default: 'ACTIVE' }
   },

@@ -15,12 +15,15 @@ import {
   updateHouseholdMemberHandler
 } from '../controllers/householdController';
 import { protect } from '../middleware/authMiddleware';
+import { getHouseholdSubscriptionHandler, startHouseholdTrialHandler } from '../controllers/subscriptionController';
 
 const router = Router();
 
 router.use(protect);
 
 router.post('/', createHouseholdHandler);
+router.get('/:id/subscription', getHouseholdSubscriptionHandler);
+router.post('/:id/subscription/trial', startHouseholdTrialHandler);
 router.get('/me', getMyHouseholdsHandler);
 router.get('/invitations/me', getMyHouseholdInvitationsHandler);
 router.post('/invitations/:invitationId/accept', acceptHouseholdInvitationHandler);

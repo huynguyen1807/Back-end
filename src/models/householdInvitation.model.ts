@@ -19,6 +19,10 @@ const householdInvitationSchema = new Schema(
 );
 
 householdInvitationSchema.index({ inviteEmail: 1, status: 1 });
+householdInvitationSchema.index({ inviteEmail: 1 }, {
+  name: 'unique_pending_family_invitation_per_email', unique: true,
+  partialFilterExpression: { status: 'PENDING' },
+});
 
 export const HouseholdInvitation = existingModel(
   'HouseholdInvitation',

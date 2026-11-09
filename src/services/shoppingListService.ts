@@ -2,6 +2,8 @@ import mongoose from 'mongoose';
 
 import { HouseholdMember } from '../models/householdMember.model';
 import { ShoppingList } from '../models/shoppingList.model';
+import { Household } from '../models/household.model';
+import { assertHouseholdSharedAccess, getHouseholdEntitlement, FamilySubscriptionError } from './subscriptionService';
 
 type OwnerType = 'USER' | 'HOUSEHOLD';
 type ShoppingListStatus = 'ACTIVE' | 'COMPLETED' | 'ARCHIVED';
@@ -18,6 +20,32 @@ const MAX_FOOD_NAME_LENGTH = 80;
 const MAX_UNIT_LENGTH = 20;
 const MAX_QUANTITY = 100000;
 const UNIT_PATTERN = /^[\p{L}\d\s./-]+$/u;
+
+export class ShoppingListConflictError extends Error {
+  readonly statusCode = 409;
+  constructor() {
+    super('Shopping list changed. Reload it and try again.');
+    this.name = 'ShoppingListConflictError';
+  }
+}
+
+async function saveShoppingList(list: any) {
+  await list.validate();
+  const revision = list.revision ?? 0;
+  if (!Number.isSafeInteger(revision) || revision < 0) throw new ShoppingListConflictError();
+  const changes = list.$getChanges();
+  // Hydrating a legacy row can include the default in $set. Revision must be
+  // changed only by $inc, otherwise MongoDB rejects the overlapping updates.
+  if (changes.$set) delete changes.$set.revision;
+  // Legacy rows have no revision. Only one writer may claim revision zero;
+  // $inc initializes it atomically without a migration or an unconditional save.
+  const saved = await ShoppingList.findOneAndUpdate({
+    _id: list._id,
+    ...(revision === 0 ? { $or: [{ revision: 0 }, { revision: { $exists: false } }] } : { revision }),
+  }, { ...changes, $inc: { ...changes.$inc, revision: 1 } }, { returnDocument: 'after', runValidators: true });
+  if (!saved) throw new ShoppingListConflictError();
+  return saved;
+}
 
 function assertValidObjectId(id: string, label: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -74,7 +102,14 @@ async function getViewableHouseholdIds(userId: string) {
     'permission.canViewShoppingList': true
   }).select('householdId');
 
-  return memberships.map((membership) => membership.householdId);
+  const visible = [];
+  for (const membership of memberships) {
+    try {
+      const entitlement = await getHouseholdEntitlement(String(membership.householdId));
+      if (entitlement.canReadSharedData) visible.push(membership.householdId);
+    } catch (error) { if (!(error instanceof FamilySubscriptionError)) throw error; }
+  }
+  return visible;
 }
 
 async function ensureCanViewList(list: any, userId: string) {
@@ -93,6 +128,7 @@ async function ensureCanViewList(list: any, userId: string) {
   if (!member || !member.permission?.canViewShoppingList) {
     throw new Error('You do not have permission to view this shopping list');
   }
+  await assertHouseholdSharedAccess(String(list.householdId), 'VIEW');
 }
 
 async function ensureCanEditList(list: any, userId: string) {
@@ -108,12 +144,14 @@ async function ensureCanEditList(list: any, userId: string) {
   }
 
   const member = await getActiveHouseholdMember(list.householdId?.toString(), userId);
-  const canEdit =
-    member?.role === 'OWNER' || member?.permission?.canEditShoppingList;
+  const household = await Household.findOne({ _id: list.householdId, status: 'ACTIVE' });
+  const owner = member?.role === 'OWNER' && String(household?.ownerId) === userId;
+  const canEdit = household && (owner || (member?.role === 'MEMBER' && member.permission?.canEditShoppingList));
 
   if (!canEdit) {
     throw new Error('You do not have permission to edit this shopping list');
   }
+  await assertHouseholdSharedAccess(String(list.householdId), 'EDIT');
 }
 
 async function findAccessibleList(listId: string, userId: string, mode: 'VIEW' | 'EDIT') {
@@ -173,12 +211,7 @@ export async function createShoppingList(userId: string, data: any) {
     }
     assertValidObjectId(householdId, 'householdId');
 
-    const member = await getActiveHouseholdMember(householdId, userId);
-    const canCreate = member?.role === 'OWNER' || member?.permission?.canEditShoppingList;
-
-    if (!canCreate) {
-      throw new Error('You do not have permission to create a shared shopping list');
-    }
+    await ensureCanEditList({ ownerType: 'HOUSEHOLD', householdId }, userId);
 
     return ShoppingList.create({
       ownerType,
@@ -234,8 +267,8 @@ export async function addShoppingListItem(listId: string, userId: string, data: 
     purchasedBy: data.isPurchased ? userId : undefined
   });
 
-  await list.save();
-  return list.items[list.items.length - 1];
+  const saved = await saveShoppingList(list);
+  return saved.items[saved.items.length - 1];
 }
 
 export async function updateShoppingListItem(
@@ -275,8 +308,8 @@ export async function updateShoppingListItem(
     item.purchasedBy = item.isPurchased ? userId : undefined;
   }
 
-  await list.save();
-  return item;
+  const saved = await saveShoppingList(list);
+  return saved.items.id(itemId);
 }
 
 export async function removeShoppingListItem(listId: string, itemId: string, userId: string) {
@@ -288,7 +321,7 @@ export async function removeShoppingListItem(listId: string, itemId: string, use
   }
 
   item.deleteOne();
-  await list.save();
+  await saveShoppingList(list);
 
   return { message: 'Shopping list item removed' };
 }
@@ -296,9 +329,9 @@ export async function removeShoppingListItem(listId: string, itemId: string, use
 export async function completeShoppingList(listId: string, userId: string) {
   const list = await findAccessibleList(listId, userId, 'EDIT');
   list.status = 'COMPLETED';
-  await list.save();
+  const saved = await saveShoppingList(list);
 
-  return list.populate('items.categoryId', 'categoryName');
+  return saved.populate('items.categoryId', 'categoryName');
 }
 
 export async function addMissingIngredientsToShoppingList(
@@ -366,6 +399,6 @@ export async function addMissingIngredientsToShoppingList(
     }
   });
 
-  await list.save();
-  return list.populate('items.categoryId', 'categoryName');
+  const saved = await saveShoppingList(list);
+  return saved.populate('items.categoryId', 'categoryName');
 }
