@@ -21,6 +21,14 @@ const householdMemberSchema = new Schema(
 );
 
 householdMemberSchema.index({ householdId: 1, userId: 1 }, { unique: true });
+householdMemberSchema.index({ userId: 1 }, {
+  name: 'unique_active_household_per_user', unique: true,
+  partialFilterExpression: { status: 'ACTIVE' },
+});
+householdMemberSchema.index({ householdId: 1 }, {
+  name: 'unique_active_owner_per_household', unique: true,
+  partialFilterExpression: { status: 'ACTIVE', role: 'OWNER' },
+});
 
 export const HouseholdMember = existingModel(
   'HouseholdMember',

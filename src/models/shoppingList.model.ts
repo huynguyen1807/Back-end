@@ -28,6 +28,7 @@ const shoppingListSchema = new Schema(
     userId: { type: objectId, ref: 'User' },
     householdId: { type: objectId, ref: 'Household' },
     listName: { type: String, required: true },
+    revision: { type: Number, default: 0, min: 0, validate: Number.isSafeInteger },
     visibility: { type: String, enum: ['PERSONAL', 'SHARED'], default: 'PERSONAL' },
     status: { type: String, enum: ['ACTIVE', 'COMPLETED', 'ARCHIVED'], default: 'ACTIVE' },
     items: [shoppingListItemSchema],

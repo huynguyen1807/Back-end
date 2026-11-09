@@ -1,3 +1,4 @@
+import { assertHouseholdInventoryAccess, HouseholdAccessError } from './householdAccessService';
 import { FoodItem } from '../models/foodItem.model';
 import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
@@ -6,8 +7,7 @@ import { Notification } from '../models/notification.model';
 import { buildInventoryNutritionDisplay, resolveNutritionForFood } from './nutritionService';
 import { FoodCategoryLike, FoodCategoryValidationResult } from '../utils/foodCategoryValidation';
 import { classifyFoodCategory } from './foodCategoryClassifierService';
-import { Household } from '../models/household.model';
-import { getUserCurrentSubscription } from './subscriptionService';
+import { getHouseholdEntitlement, getUserCurrentSubscription } from './subscriptionService';
 import { validateNutritionSnapshot } from '../utils/nutritionValidation';
 import { referenceFoodStatus } from '../utils/storageGuidance';
 
@@ -19,7 +19,7 @@ export async function getInventoryOwnerContext(userId: string, requestedOwnerTyp
     if (membership) {
       return { ownerType: 'HOUSEHOLD', householdId: requestedHouseholdId, userId };
     }
-    throw new Error('You are not a member of this household');
+    throw new HouseholdAccessError('You are not a member of this household');
   } else if (requestedOwnerType === 'USER') {
     return { ownerType: 'USER', userId };
   }
@@ -221,6 +221,7 @@ async function enrichFoodNutrition(
 // ─── GET all food items của user ─────────────────────────────────────────────
 export async function getFoodItems(userId: string, filter?: string, ownerType?: string, householdId?: string) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   await normalizeInventoryCategoryStatuses(context, userId);
   const query: any = {
     ...buildOwnerQuery(context),
@@ -245,6 +246,7 @@ export async function getFoodItems(userId: string, filter?: string, ownerType?: 
 // ─── GET single food item ─────────────────────────────────────────────────────
 export async function getFoodItemById(foodId: string, userId: string, ownerType?: string, householdId?: string) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false })
     .populate('categoryId', CATEGORY_SELECT)
     .populate('storageLocationId', 'storageName storageType description');
@@ -257,6 +259,7 @@ export async function getFoodItemById(foodId: string, userId: string, ownerType?
 // ─── CREATE food item ─────────────────────────────────────────────────────────
 export async function createFoodItem(userId: string, data: any, ownerType?: string, householdId?: string, options: { allowCategoryAi?: boolean; provenance?: Record<string, unknown> } = {}) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
   const {
     categoryId,
     storageLocationId,
@@ -278,16 +281,11 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
 
   // Enforce inventory limit based on subscription
   if (context.ownerType === 'HOUSEHOLD') {
-    const household = await Household.findById(context.householdId);
-    if (household) {
-      const subscription = await getUserCurrentSubscription(household.ownerId.toString());
-      if (subscription && subscription.limits && subscription.limits.maxFoodItems) {
-        const currentCount = await FoodItem.countDocuments({ ownerType: 'HOUSEHOLD', householdId: context.householdId, isDeleted: false, isConsumed: false, quantity: { $gt: 0 } });
-        if (currentCount >= subscription.limits.maxFoodItems) {
-          throw new Error(`Kho gia đình đã đạt giới hạn (${subscription.limits.maxFoodItems} món). Vui lòng nâng cấp gói.`);
-        }
-      }
-    }
+    const subscription = await getHouseholdEntitlement(String(context.householdId));
+    const limit = subscription.limits?.maxFoodItems;
+    if (!Number.isInteger(limit) || limit < 0) throw new HouseholdAccessError('Family plan food limit is not configured');
+    const currentCount = await FoodItem.countDocuments({ ownerType: 'HOUSEHOLD', householdId: context.householdId, isDeleted: false, isConsumed: false, quantity: { $gt: 0 } });
+    if (currentCount >= limit) throw new HouseholdAccessError(`Kho gia đình đã đạt giới hạn (${limit} món).`);
   } else {
     const subscription = await getUserCurrentSubscription(userId);
     if (subscription && subscription.limits && subscription.limits.maxFoodItems) {
@@ -348,6 +346,7 @@ export async function createFoodItem(userId: string, data: any, ownerType?: stri
 // ─── UPDATE food item ─────────────────────────────────────────────────────────
 export async function updateFoodItem(foodId: string, userId: string, data: any, ownerType?: string, householdId?: string) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
   const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false });
   if (!item) throw new Error('Food item not found');
 
@@ -432,6 +431,7 @@ export async function updateFoodItem(foodId: string, userId: string, data: any, 
 // ─── SOFT DELETE food item ────────────────────────────────────────────────────
 export async function deleteFoodItem(foodId: string, userId: string, ownerType?: string, householdId?: string) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
   const item = await FoodItem.findOne({ _id: foodId, ...buildOwnerQuery(context), isDeleted: false });
   if (!item) throw new Error('Food item not found');
 
@@ -447,6 +447,7 @@ export async function deleteFoodItem(foodId: string, userId: string, ownerType?:
 // ─── MARK as consumed ─────────────────────────────────────────────────────────
 export async function markFoodConsumed(foodId: string, userId: string, ownerType?: string, householdId?: string) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'EDIT');
   const item = await FoodItem.findOne({
     _id: foodId,
     ...buildOwnerQuery(context),
@@ -474,6 +475,7 @@ export async function getFoodCategories() {
 // ─── Summary stats ────────────────────────────────────────────────────────────
 export async function getFoodSummary(userId: string, ownerType?: string, householdId?: string) {
   const context = await getInventoryOwnerContext(userId, ownerType, householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   await normalizeInventoryCategoryStatuses(context, userId);
   const base = {
     ...buildOwnerQuery(context),

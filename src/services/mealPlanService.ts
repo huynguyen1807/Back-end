@@ -1,3 +1,4 @@
+import { assertHouseholdInventoryAccess } from './householdAccessService';
 import { MealPlan } from '../models/mealPlan.model';
 import { FoodItem } from '../models/foodItem.model';
 import { AIGeneratedData } from '../models/aiGeneratedData.model';
@@ -211,7 +212,10 @@ async function resolveUsedFoods(meal: any, ownerQuery: any = {}): Promise<any[]>
   return resolved;
 }
 
-async function applyFoodUsage(usedFoods: any[] = [], direction: 'consume' | 'restore', ownerQuery: any = {}) {
+async function applyFoodUsage(usedFoods: any[] = [], direction: 'consume' | 'restore', ownerQuery: any = {}, userId: string) {
+  if (usedFoods.length) {
+    await assertHouseholdInventoryAccess({ ownerType: ownerQuery.ownerType, householdId: ownerQuery.householdId }, userId, 'EDIT');
+  }
   for (const usage of usedFoods) {
     const foodItemId = normalizeFoodItemId(usage.foodItemId);
     const quantityUsed = Number(usage.quantityUsed) || 0;
@@ -246,7 +250,7 @@ async function applyFoodUsage(usedFoods: any[] = [], direction: 'consume' | 'res
   }
 }
 
-async function applyMealInventoryTransitions(oldMeals: any[] = [], newMeals: any[] = [], ownerQuery: any = {}) {
+async function applyMealInventoryTransitions(oldMeals: any[] = [], newMeals: any[] = [], ownerQuery: any = {}, userId: string) {
   const nextMeals = newMeals.map((meal) => ({ ...meal }));
   const usedOldIndexes = new Set<number>();
   const matchedOldMeals: any[] = [];
@@ -273,7 +277,7 @@ async function applyMealInventoryTransitions(oldMeals: any[] = [], newMeals: any
     const oldApplied = oldMeal?.status === 'COMPLETED' && oldMeal?.inventoryApplied;
 
     if (oldApplied && meal.status !== 'COMPLETED') {
-      await applyFoodUsage(oldMeal.usedFoods || [], 'restore', ownerQuery);
+      await applyFoodUsage(oldMeal.usedFoods || [], 'restore', ownerQuery, userId);
       meal.inventoryApplied = false;
     }
   }
@@ -282,7 +286,7 @@ async function applyMealInventoryTransitions(oldMeals: any[] = [], newMeals: any
     const oldMeal = oldMeals[index] as any;
     const oldApplied = oldMeal?.status === 'COMPLETED' && oldMeal?.inventoryApplied;
     if (!usedOldIndexes.has(index) && oldApplied) {
-      await applyFoodUsage(oldMeal.usedFoods || [], 'restore', ownerQuery);
+      await applyFoodUsage(oldMeal.usedFoods || [], 'restore', ownerQuery, userId);
     }
   }
 
@@ -294,7 +298,7 @@ async function applyMealInventoryTransitions(oldMeals: any[] = [], newMeals: any
 
     if (meal.status === 'COMPLETED') {
       if (!sameCompletedMeal && (meal.usedFoods || []).length) {
-        await applyFoodUsage(meal.usedFoods, 'consume', ownerQuery);
+        await applyFoodUsage(meal.usedFoods, 'consume', ownerQuery, userId);
       }
       meal.inventoryApplied = Boolean((meal.usedFoods || []).length);
     } else {
@@ -467,6 +471,7 @@ export async function listMealPlans(userId: string, query: any = {}) {
 
   if (query.ownerType || query.householdId) {
     const context = await getInventoryOwnerContext(userId, query.ownerType, query.householdId);
+    await assertHouseholdInventoryAccess(context, userId, 'VIEW');
     if (context.ownerType === 'HOUSEHOLD') {
       filter.householdId = context.householdId;
       filter.inventoryOwnerType = { $in: ['HOUSEHOLD', null] };
@@ -481,6 +486,9 @@ export async function listMealPlans(userId: string, query: any = {}) {
   applyPlanDateQuery(filter, query);
 
   const plans = await MealPlan.find(filter).sort({ planDateKey: 1, planDate: 1, updatedAt: -1 });
+  for (const plan of plans) {
+    await assertHouseholdInventoryAccess({ ownerType: plan.inventoryOwnerType || (plan.householdId ? 'HOUSEHOLD' : 'USER'), householdId: plan.householdId }, userId, 'VIEW');
+  }
   await Promise.all(plans.map(backfillMealPlanNutrition));
   return MealPlan.populate(plans, [
     { path: 'meals.recipeId', select: 'recipeName imageUrl calories macroSummary' },
@@ -489,11 +497,12 @@ export async function listMealPlans(userId: string, query: any = {}) {
 }
 
 export async function getMealPlanById(planId: string, userId: string) {
-  const plan = await MealPlan.findOne({ _id: planId, userId })
-    .populate('meals.recipeId', 'recipeName imageUrl calories macroSummary')
-    .populate('meals.usedFoods.foodItemId', 'foodName quantity unit status');
+  const plan = await MealPlan.findOne({ _id: planId, userId });
 
   if (!plan) throw new Error('Meal plan not found');
+  await assertHouseholdInventoryAccess({ ownerType: plan.inventoryOwnerType || (plan.householdId ? 'HOUSEHOLD' : 'USER'), householdId: plan.householdId }, userId, 'VIEW');
+  await plan.populate('meals.recipeId', 'recipeName imageUrl calories macroSummary');
+  await plan.populate('meals.usedFoods.foodItemId', 'foodName quantity unit status');
   return plan;
 }
 
@@ -529,13 +538,14 @@ function isDuplicateMealPlanKeyError(error: any) {
 export async function createMealPlan(userId: string, data: any) {
   assertMealsCanBeScheduled(data.planDate, Array.isArray(data.meals) ? data.meals : []);
   const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   const ownerQuery = buildOwnerQuery(context);
   const payload = await buildMealPlanPayload(userId, {
     ...data,
     ownerType: context.ownerType,
     householdId: context.householdId,
   }, ownerQuery);
-  payload.meals = await applyMealInventoryTransitions([], payload.meals, ownerQuery);
+  payload.meals = await applyMealInventoryTransitions([], payload.meals, ownerQuery, userId);
   try {
     return await MealPlan.create(payload);
   } catch (error) {
@@ -551,6 +561,7 @@ export async function addMealToPlan(userId: string, data: any) {
   if (!data.meal) throw new Error('meal is required');
 
   const context = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   const ownerQuery = buildOwnerQuery(context);
   const { dateKey, scheduledTime } = assertSchedulableDateTime(
     data.planDate,
@@ -621,6 +632,7 @@ export async function updateMealPlan(planId: string, userId: string, data: any) 
     existing.inventoryOwnerType || (existing.householdId ? 'HOUSEHOLD' : 'USER'),
     existing.householdId?.toString(),
   );
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   const ownerQuery = buildOwnerQuery(context);
   const payload = await buildMealPlanPayload(userId, {
     ...existing.toObject(),
@@ -641,7 +653,7 @@ export async function updateMealPlan(planId: string, userId: string, data: any) 
     }
   }
 
-  payload.meals = await applyMealInventoryTransitions(existing.meals || [], payload.meals, ownerQuery);
+  payload.meals = await applyMealInventoryTransitions(existing.meals || [], payload.meals, ownerQuery, userId);
   const totals = calculateMealTotals(payload.meals);
   payload.totalCalories = totals.totalCalories;
   payload.macroSummary = totals.macroSummary;
@@ -660,8 +672,9 @@ export async function deleteMealPlan(planId: string, userId: string) {
     existing.inventoryOwnerType || (existing.householdId ? 'HOUSEHOLD' : 'USER'),
     existing.householdId?.toString(),
   );
+  await assertHouseholdInventoryAccess(context, userId, 'VIEW');
   const ownerQuery = buildOwnerQuery(context);
-  await applyMealInventoryTransitions(existing.meals || [], [], ownerQuery);
+  await applyMealInventoryTransitions(existing.meals || [], [], ownerQuery, userId);
   await MealPlan.deleteOne({ _id: planId, userId });
   return { message: 'Meal plan deleted successfully' };
 }
@@ -671,6 +684,9 @@ export async function getMealPlanSummary(userId: string, date: string | Date) {
   applyPlanDateQuery(filter, { date });
   const plans = await MealPlan.find(filter);
 
+  for (const plan of plans) {
+    await assertHouseholdInventoryAccess({ ownerType: plan.inventoryOwnerType || (plan.householdId ? 'HOUSEHOLD' : 'USER'), householdId: plan.householdId }, userId, 'VIEW');
+  }
   const meals = plans.flatMap((plan) => plan.meals || []);
   const totals = calculateMealTotals(meals);
 
@@ -1854,6 +1870,7 @@ export async function generateDailyMealPlan(userId: string, data: any = {}) {
       : ['BREAKFAST', 'LUNCH', 'DINNER'];
 
   const inventoryContext = await getInventoryOwnerContext(userId, data.ownerType, data.householdId);
+  await assertHouseholdInventoryAccess(inventoryContext, userId, 'VIEW');
   const foods = await FoodItem.find({
     ...buildOwnerQuery(inventoryContext),
     isDeleted: false,

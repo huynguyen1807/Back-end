@@ -1,6 +1,7 @@
 import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/authMiddleware';
+import { HouseholdMembershipError } from '../services/householdService';
 import {
   acceptHouseholdInvitation,
   addHouseholdMember,
@@ -50,9 +51,17 @@ function getStatusCode(message: string) {
 }
 
 function handleHouseholdError(res: Response, error: any) {
+  if (error instanceof HouseholdMembershipError) {
+    res.status(error.statusCode).json({ success: false, message: error.message });
+    return;
+  }
   const message =
     error.code === 11000
-      ? 'User is already a household member'
+      ? error.keyPattern?.inviteEmail
+        ? 'User already has a pending family invitation'
+        : error.keyPattern?.householdId && !error.keyPattern?.userId
+          ? 'Household already has an active owner'
+          : 'User is already a household member'
       : error.message ?? 'Server error';
   const status = getStatusCode(message);
   res.status(status).json({ success: false, message });

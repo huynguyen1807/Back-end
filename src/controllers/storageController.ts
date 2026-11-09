@@ -1,3 +1,4 @@
+import { HouseholdAccessError } from '../services/householdAccessService';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/authMiddleware';
 import {
@@ -15,6 +16,10 @@ export const listStorageLocations = async (req: AuthRequest, res: Response) => {
     const locations = await getStorageLocations(userId, ownerType as string, householdId as string);
     res.json({ success: true, data: locations });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -26,6 +31,10 @@ export const createLocation = async (req: AuthRequest, res: Response) => {
     const location = await createStorageLocation(userId, req.body, ownerType as string, householdId as string);
     res.status(201).json({ success: true, data: location });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message.includes('required') ? 400 : 500;
     res.status(status).json({ success: false, message: error.message });
   }
@@ -38,6 +47,10 @@ export const updateLocation = async (req: AuthRequest, res: Response) => {
     const location = await updateStorageLocation(req.params.id as string, userId, req.body, ownerType as string, householdId as string);
     res.json({ success: true, data: location });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message.includes('not found') ? 404 : 500;
     res.status(status).json({ success: false, message: error.message });
   }
@@ -50,6 +63,10 @@ export const deleteLocation = async (req: AuthRequest, res: Response) => {
     const result = await deleteStorageLocation(req.params.id as string, userId, ownerType as string, householdId as string);
     res.json({ success: true, ...result });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     const status = error.message.includes('not found') ? 404 : error.message.includes('Cannot delete') ? 409 : 500;
     res.status(status).json({ success: false, message: error.message });
   }
@@ -69,6 +86,10 @@ export const storageSuggestion = async (req: AuthRequest, res: Response) => {
     const suggestion = await getStorageSuggestion(userId, categoryId as string, ownerType as string, householdId as string);
     res.json({ success: true, data: suggestion });
   } catch (error: any) {
+    if (error instanceof HouseholdAccessError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 };
