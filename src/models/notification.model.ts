@@ -16,6 +16,9 @@ const notificationSchema = new Schema(
     },
     priority: { type: String, enum: ['LOW', 'MEDIUM', 'HIGH'], default: 'MEDIUM' },
     isRead: { type: Boolean, default: false },
+    // Soft-delete: giữ lại document để checkExpiryAndNotify/checkStorageAndNotify
+    // không tạo lại thông báo mà người dùng đã xoá cho cùng food item + loại cảnh báo.
+    isDeleted: { type: Boolean, default: false },
     scheduledAt: Date,
     sentAt: Date,
     readAt: Date
@@ -24,6 +27,7 @@ const notificationSchema = new Schema(
 );
 
 notificationSchema.index({ userId: 1, isRead: 1 });
+notificationSchema.index({ userId: 1, isDeleted: 1 });
 notificationSchema.index({ scheduledAt: 1 });
 
 export const Notification = existingModel('Notification', notificationSchema, 'notifications');
