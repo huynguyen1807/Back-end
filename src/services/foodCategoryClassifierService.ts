@@ -6,6 +6,7 @@ import {
   normalizeFoodText,
   validateFoodCategoryWithDatabase,
 } from '../utils/foodCategoryValidation';
+import { predictFoodCategory } from './foodCategoryModel';
 
 type ClassificationInput = {
   foodName: string;
@@ -48,7 +49,7 @@ function getGeminiModelNames() {
     ...configured,
     'gemini-3.1-flash-lite',
     'gemini-3.5-flash',
-    'gemini-2.5-flash',
+    'gemini-3.8-flash',
   ]));
 }
 
@@ -177,6 +178,44 @@ function confidenceLabel(value: number): FoodCategoryValidationResult['confidenc
   return 'NONE';
 }
 
+function findCategoryByName(categoryName: string, categories: FoodCategoryLike[]) {
+  const key = normalizeFoodText(categoryName);
+  return categories.find((category) => normalizeFoodText(category.categoryName || '') === key);
+}
+
+/**
+ * Lớp model Naive Bayes đã huấn luyện (`npm run train:food-category-model`) — chỉ dùng để
+ * giải quyết đúng vùng mà rule-based KHÔNG chắc (NONE/LOW), không bao giờ ghi đè một quyết
+ * định rule-based đã tự tin (MEDIUM/HIGH), để không ảnh hưởng các case đang đúng.
+ */
+function classifyWithModel(foodName: string, selectedCategoryId: any, categories: FoodCategoryLike[]) {
+  const prediction = predictFoodCategory(foodName);
+  if (!prediction || (prediction.confidence !== 'HIGH' && prediction.confidence !== 'MEDIUM')) return null;
+
+  const category = findCategoryByName(prediction.categoryName, categories);
+  if (!category) return null;
+
+  const selectedId = selectedCategoryId ? String(selectedCategoryId) : undefined;
+  const selectedCategory = categories.find((item) => getCategoryId(item) === selectedId);
+  const recommendedCategoryId = getCategoryId(category);
+  const shouldWarn = Boolean(recommendedCategoryId && recommendedCategoryId !== selectedId);
+
+  return {
+    isMismatch: shouldWarn,
+    confidence: prediction.confidence,
+    source: 'MODEL' as const,
+    selectedCategoryId: selectedId,
+    selectedCategoryName: getCategoryLabel(selectedCategory),
+    recommendedCategoryId,
+    recommendedCategoryName: getCategoryLabel(category),
+    matchedCategoryIds: recommendedCategoryId ? [recommendedCategoryId] : [],
+    reason: `Mô hình Naive Bayes đã huấn luyện dự đoán "${getCategoryLabel(category)}" (xác suất ${(prediction.probability * 100).toFixed(1)}%).`,
+    warning: shouldWarn
+      ? `Danh mục "${getCategoryLabel(selectedCategory)}" không khớp với thực phẩm "${foodName}". Mô hình đã huấn luyện gợi ý danh mục phù hợp hơn là "${getCategoryLabel(category)}".`
+      : undefined,
+  } satisfies FoodCategoryValidationResult;
+}
+
 export async function classifyFoodCategory(input: ClassificationInput): Promise<FoodCategoryValidationResult> {
   const deterministic = validateFoodCategoryWithDatabase(
     input.foodName,
@@ -187,6 +226,9 @@ export async function classifyFoodCategory(input: ClassificationInput): Promise<
   if (!input.allowAi || !shouldUseGemini(deterministic)) {
     return deterministic;
   }
+
+  const modelResult = classifyWithModel(input.foodName, input.selectedCategoryId, input.categories);
+  if (modelResult) return modelResult;
 
   const aiResult = await classifyWithGemini(input.foodName, input.selectedCategoryId, input.categories);
   const aiCategory = aiResult ? findCategoryByAiResult(aiResult, input.categories) : undefined;
