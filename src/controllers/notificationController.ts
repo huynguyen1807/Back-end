@@ -21,8 +21,8 @@ export const getNotifications = async (req: AuthRequest, res: Response): Promise
       checkStorageAndNotify(userId),
     ]);
 
-    // Trả về tất cả notifications của user, mới nhất trước
-    const list = await Notification.find({ userId }).sort({ createdAt: -1 });
+    // Trả về tất cả notifications chưa bị xoá của user, mới nhất trước
+    const list = await Notification.find({ userId, isDeleted: false }).sort({ createdAt: -1 });
     res.json({ success: true, data: list });
   } catch (error: any) {
     console.error('[getNotifications error]', error);
@@ -43,7 +43,7 @@ export const markAllAsRead = async (req: AuthRequest, res: Response): Promise<vo
     }
 
     const result = await Notification.updateMany(
-      { userId, isRead: false },
+      { userId, isRead: false, isDeleted: false },
       { isRead: true, readAt: new Date() }
     );
 
@@ -68,7 +68,7 @@ export const markAsRead = async (req: AuthRequest, res: Response): Promise<void>
 
     const { id } = req.params;
     const notification = await Notification.findOneAndUpdate(
-      { _id: id, userId },
+      { _id: id, userId, isDeleted: false },
       { isRead: true, readAt: new Date() },
       { returnDocument: 'after' }
     );
@@ -87,7 +87,8 @@ export const markAsRead = async (req: AuthRequest, res: Response): Promise<void>
 
 /**
  * DELETE /api/notifications/:id
- * Delete a single notification
+ * Soft-delete a single notification (giữ lại document để tránh
+ * checkExpiryAndNotify/checkStorageAndNotify tạo lại cùng cảnh báo).
  */
 export const deleteNotification = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -98,7 +99,11 @@ export const deleteNotification = async (req: AuthRequest, res: Response): Promi
     }
 
     const { id } = req.params;
-    const notification = await Notification.findOneAndDelete({ _id: id, userId });
+    const notification = await Notification.findOneAndUpdate(
+      { _id: id, userId, isDeleted: false },
+      { isDeleted: true },
+      { returnDocument: 'after' }
+    );
 
     if (!notification) {
       res.status(404).json({ success: false, message: 'Không tìm thấy thông báo' });
@@ -114,7 +119,7 @@ export const deleteNotification = async (req: AuthRequest, res: Response): Promi
 
 /**
  * DELETE /api/notifications
- * Delete all notifications for current user
+ * Soft-delete all notifications for current user
  */
 export const deleteAllNotifications = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -124,10 +129,33 @@ export const deleteAllNotifications = async (req: AuthRequest, res: Response): P
       return;
     }
 
-    const result = await Notification.deleteMany({ userId });
-    res.json({ success: true, deleted: result.deletedCount });
+    const result = await Notification.updateMany({ userId, isDeleted: false }, { isDeleted: true });
+    res.json({ success: true, deleted: result.modifiedCount });
   } catch (error: any) {
     console.error('[deleteAllNotifications error]', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * DELETE /api/notifications/read
+ * Soft-delete only the notifications the user has already read
+ */
+export const deleteReadNotifications = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+
+    const result = await Notification.updateMany(
+      { userId, isRead: true, isDeleted: false },
+      { isDeleted: true }
+    );
+    res.json({ success: true, deleted: result.modifiedCount });
+  } catch (error: any) {
+    console.error('[deleteReadNotifications error]', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

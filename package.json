@@ -13,7 +13,11 @@
     "test:schedule": "tsx --test src/utils/mealSchedule.test.ts",
     "test:scan": "tsx --test src/utils/scanPayload.test.ts src/utils/receiptRecognition.test.ts src/services/scanJobManager.test.ts src/utils/storageGuidance.test.ts",
     "test:schedule:db": "tsx src/tests/mealPlanPersistence.integration.ts",
-    "smtp:verify": "tsx src/scripts/verifySmtp.ts"
+    "smtp:verify": "tsx src/scripts/verifySmtp.ts",
+    "eval:food-category": "tsx src/scripts/evaluateFoodCategoryClassifier.ts",
+    "eval:recipe-generation": "tsx src/scripts/evaluateRecipeGeneration.ts",
+    "train:food-category-model": "tsx src/scripts/trainFoodCategoryClassifier.ts",
+    "build:recipe-tuning-data": "tsx src/scripts/buildRecipeTuningDataset.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
