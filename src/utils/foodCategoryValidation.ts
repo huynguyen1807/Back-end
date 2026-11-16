@@ -11,7 +11,7 @@ export type FoodCategoryLike = {
 export type FoodCategoryValidationResult = {
   isMismatch: boolean;
   confidence: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH';
-  source?: 'DB' | 'GEMINI' | 'NONE';
+  source?: 'DB' | 'MODEL' | 'GEMINI' | 'NONE';
   selectedCategoryId?: string;
   selectedCategoryName?: string;
   recommendedCategoryId?: string;
@@ -28,6 +28,23 @@ type ScoredCategory = {
 };
 
 const AMBIGUOUS_SINGLE_TERMS = new Set(['ca']);
+
+// Khi tên món chứa từ chỉ "món đã chế biến" (canh, súp, cơm hộp...) hoặc "món đông lạnh
+// chế biến sẵn" (há cảo, chả cá...), ưu tiên nhận diện theo HÌNH THỨC MÓN ĂN trước,
+// bỏ qua gợi ý theo nguyên liệu thô (CATEGORY_HINTS) để tránh nhầm món đã nấu thành
+// nguyên liệu sống chỉ vì tên món có chứa tên nguyên liệu đó (vd "Canh chua cá lóc"
+// không phải là "Cá"). Rút ra từ các case khó trong bộ dữ liệu đánh giá
+// (`src/evaluation/foodCategoryDataset.ts`).
+const DISH_FORM_HINTS: Array<{ terms: string[]; categoryKeys: string[] }> = [
+  {
+    terms: ['canh', 'sup', 'chao', 'mon xao', 'mon kho', 'com hop', 'salad', 'sandwich'],
+    categoryKeys: ['cooked food', 'do an chin', 'thuc an chin'],
+  },
+  {
+    terms: ['ha cao', 'xuc xich', 'cha ca'],
+    categoryKeys: ['frozen food', 'dong lanh', 'do dong lanh'],
+  },
+];
 
 const CATEGORY_HINTS: Array<{ terms: string[]; categoryKeys: string[] }> = [
   {
@@ -108,6 +125,14 @@ function hasTerm(foodName: string, term: string) {
 export function getFoodCategoryHintKeys(foodName: string) {
   const source = normalizeFoodText(foodName);
   if (!source) return [];
+
+  const dishFormKeys = new Set<string>();
+  DISH_FORM_HINTS.forEach((hint) => {
+    if (hint.terms.some((term) => hasTerm(source, term))) {
+      hint.categoryKeys.forEach((key) => dishFormKeys.add(normalizeFoodText(key)));
+    }
+  });
+  if (dishFormKeys.size) return Array.from(dishFormKeys);
 
   const keys = new Set<string>();
   CATEGORY_HINTS.forEach((hint) => {

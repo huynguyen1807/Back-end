@@ -121,7 +121,7 @@ function getGeminiModelNames() {
     ...configuredModels,
     'gemini-3.1-flash-lite',
     'gemini-3.5-flash',
-    'gemini-2.5-flash',
+    'gemini-3.8-flash',
   ]));
 }
 
@@ -153,7 +153,7 @@ function parseJsonFromAiText<T>(text: string, fallback: T): T {
   }
 }
 
-function buildAiRecipePrompt(input: GenerateAiRecipeDraftsInput) {
+export function buildAiRecipePrompt(input: GenerateAiRecipeDraftsInput) {
   const inventory = input.priorityFoods.slice(0, 30).map((food) => ({
     foodName: food.foodName,
     categoryName: food.categoryName,
@@ -180,6 +180,7 @@ Hard rules:
 - All user-facing fields must use Vietnamese with proper accents: recipeName, description, steps, and priorityReasons.
 - Recipe names must be natural Vietnamese dish names without patterns like "A + B", "A ket hop B", "Breakfast with ...", "Lunch with ...".
 - Make recipes diverse. Do not repeat the same formula, first ingredient, cooking technique, or dish structure.
+- Within the SAME response, no two recipes may use the exact same set of main ingredients, even if the cooking technique differs (e.g. do not return both "grilled chicken + broccoli" and "stir-fried chicken + broccoli" — vary at least one main ingredient, not just the technique).
 - Cross-check against common Vietnamese and home-cooking recipe patterns. Use realistic dishes, not ingredient mashups.
 - Rotate cooking techniques across the list: salad, soup, stir-fry, braise, pan-sear, porridge, rice bowl, noodle bowl, smoothie, yogurt bowl, rolls.
 - For ENOUGH_INGREDIENTS recipes, only use available inventory ingredients and do not require missing items.

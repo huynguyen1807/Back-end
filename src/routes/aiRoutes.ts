@@ -41,6 +41,24 @@ const receiveScanImage: import('express').RequestHandler = (req, res, next) => {
     next();
   });
 };
+
+const videoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    if (['video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo'].includes(file.mimetype)) callback(null, true);
+    else callback(new Error('Vui lòng dùng video MP4, MOV, WebM hoặc AVI.'));
+  },
+});
+const receiveRecipeVideo: import('express').RequestHandler = (req, res, next) => {
+  videoUpload.single('video')(req, res, (error) => {
+    if (error) {
+      res.status(400).json({ message: error.code === 'LIMIT_FILE_SIZE' ? 'Video quá lớn. Vui lòng chọn video nhỏ hơn 50 MB.' : error.message });
+      return;
+    }
+    next();
+  });
+};
 aiRouter.post('/scan-jobs', receiveScanImage, createScanJob);
 aiRouter.post('/scan-receipt', receiveScanImage, scanReceipt);
 aiRouter.get('/scan-jobs/:id', getScanJob);
@@ -55,7 +73,7 @@ aiRouter.post('/predict-expiry', predictExpiryController);
 aiRouter.post('/storage-suggestions', storageSuggestionsController);
 aiRouter.post('/meal-suggestions', mealSuggestionsController);
 aiRouter.post('/nutrition-info', nutritionInfoController);
-aiRouter.post('/analyze-recipe-video', upload.single('video'), analyzeRecipeVideoController);
+aiRouter.post('/analyze-recipe-video', receiveRecipeVideo, analyzeRecipeVideoController);
 aiRouter.post('/personalized-menu', personalizedMenuController);
 
 export default aiRouter;

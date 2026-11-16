@@ -7,6 +7,7 @@ import { FoodCategory } from '../models/foodCategory.model';
 import { StorageLocation } from '../models/storageLocation.model';
 import { normalizeFoodText } from '../utils/foodCategoryValidation';
 import { recognizeFoodFromImage } from '../services/scanRecognitionService';
+import { analyzeRecipeVideo } from '../services/recipeVideoService';
 
 // Initialize Google Gemini lazily to avoid import hoisting issues
 function getGenAI(): GoogleGenerativeAI | null {
@@ -394,24 +395,49 @@ Chú ý: Chỉ trả về JSON thô.`;
   }
 };
 
+const MOCK_RECIPE_VIDEO_RESULT = {
+  dishName: 'Bún chả Hà Nội',
+  ingredients: ['Thịt ba chỉ', 'Thịt nạc vai', 'Đu đủ', 'Cà rốt', 'Bún', 'Rau thơm'],
+  cookingSteps: [
+    'Sơ chế và ướp thịt ba chỉ và thịt nạc băm viên với hành, sả, dầu hào, nước màu.',
+    'Làm dưa góp từ đu đủ, cà rốt tỉa hoa bóp muối, giấm, đường.',
+    'Nướng thịt trên than hoa cho chín vàng thơm.',
+    'Pha nước chấm ấm nóng chua ngọt vừa ăn.',
+    'Trình bày bún, thịt nướng, nước chấm và rau sống ăn kèm.'
+  ],
+  cookingTime: 45
+};
+
 /**
  * POST /api/ai/analyze-recipe-video
  */
 export const analyzeRecipeVideoController = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    res.json({
-      dishName: 'Bún chả Hà Nội',
-      ingredients: ['Thịt ba chỉ', 'Thịt nạc vai', 'Đu đủ', 'Cà rốt', 'Bún', 'Rau thơm'],
-      cookingSteps: [
-        'Sơ chế và ướp thịt ba chỉ và thịt nạc băm viên với hành, sả, dầu hào, nước màu.',
-        'Làm dưa góp từ đu đủ, cà rốt tỉa hoa bóp muối, giấm, đường.',
-        'Nướng thịt trên than hoa cho chín vàng thơm.',
-        'Pha nước chấm ấm nóng chua ngọt vừa ăn.',
-        'Trình bày bún, thịt nướng, nước chấm và rau sống ăn kèm.'
-      ],
-      cookingTime: 45
+    if (!req.file) {
+      res.status(400).json({ message: 'Vui lòng cung cấp file video công thức' });
+      return;
+    }
+
+    const { result, errorCode, errorMessage } = await analyzeRecipeVideo({
+      videoBuffer: req.file.buffer,
+      mimeType: req.file.mimetype,
     });
+
+    if (result) {
+      res.json(result);
+      return;
+    }
+
+    if (errorCode === 'GEMINI_API_KEY_MISSING') {
+      console.warn('⚠️  [GEMINI API] Running in mock fallback mode for analyzeRecipeVideo');
+      res.json(MOCK_RECIPE_VIDEO_RESULT);
+      return;
+    }
+
+    console.error('[analyzeRecipeVideo failed]', errorMessage);
+    res.status(502).json({ message: 'Không thể phân tích video công thức, vui lòng thử lại.', error: errorMessage });
   } catch (error: any) {
+    console.error(error);
     res.status(500).json({ message: 'Lỗi phân tích video công thức', error: error.message });
   }
 };

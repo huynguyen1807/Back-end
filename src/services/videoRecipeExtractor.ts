@@ -35,10 +35,9 @@ const GEMINI_MODELS = (process.env.GEMINI_MODEL || process.env.GEMINI_MODELS || 
   .filter(Boolean);
 
 const FALLBACK_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro'
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.8-flash'
 ];
 
 function getGenAI(): GoogleGenerativeAI | null {

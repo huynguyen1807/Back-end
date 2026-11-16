@@ -6,6 +6,7 @@ import {
   markAsRead,
   deleteNotification,
   deleteAllNotifications,
+  deleteReadNotifications,
 } from '../controllers/notificationController';
 
 const notificationRouter = Router();
@@ -19,6 +20,8 @@ notificationRouter.patch('/read-all', markAllAsRead);
 notificationRouter.patch('/:id/read', markAsRead);
 
 notificationRouter.delete('/', deleteAllNotifications);
+// QUAN TRỌNG: /read phải đặt TRƯỚC /:id để tránh Express hiểu "read" là 1 id
+notificationRouter.delete('/read', deleteReadNotifications);
 notificationRouter.delete('/:id', deleteNotification);
 
 export default notificationRouter;

@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import { FoodCategory } from '../models/foodCategory.model';
 import { normalizeFoodText } from '../utils/foodCategoryValidation';
 
-type CategorySeed = {
+export type CategorySeed = {
   categoryName: string;
   displayName: string;
   description: string;
@@ -15,7 +15,7 @@ type CategorySeed = {
   sortOrder: number;
 };
 
-const CATEGORY_SEEDS: CategorySeed[] = [
+export const CATEGORY_SEEDS: CategorySeed[] = [
   {
     categoryName: 'Meat',
     displayName: 'Thịt',
@@ -102,7 +102,7 @@ const CATEGORY_SEEDS: CategorySeed[] = [
     displayName: 'Đông lạnh',
     description: 'Thực phẩm bảo quản đông lạnh hoặc sản phẩm chế biến đông lạnh.',
     aliases: ['frozen food', 'frozen', 'dong lanh', 'do dong lanh'],
-    keywords: ['dong lanh', 'frozen', 'vien', 'cha ca', 'xuc xich', 'dumpling'],
+    keywords: ['dong lanh', 'frozen', 'vien', 'cha ca', 'xuc xich', 'dumpling', 'ha cao'],
     foodExamples: ['Cá viên đông lạnh', 'Chả cá', 'Xúc xích đông lạnh', 'Há cảo đông lạnh'],
     sortOrder: 90,
   },
@@ -151,12 +151,16 @@ async function main() {
   await mongoose.disconnect();
 }
 
-void main().catch(async (error) => {
-  console.error(JSON.stringify({ ok: false, error: error.message }, null, 2));
-  try {
-    await mongoose.disconnect();
-  } catch (_) {
-    // no-op
-  }
-  process.exit(1);
-});
+// Chỉ tự chạy khi file này được gọi trực tiếp (npm run seed:food-categories),
+// không chạy khi bị import (ví dụ bởi script đánh giá) để tránh ghi nhầm vào DB thật.
+if (require.main === module) {
+  void main().catch(async (error) => {
+    console.error(JSON.stringify({ ok: false, error: error.message }, null, 2));
+    try {
+      await mongoose.disconnect();
+    } catch (_) {
+      // no-op
+    }
+    process.exit(1);
+  });
+}
