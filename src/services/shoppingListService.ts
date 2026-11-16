@@ -7,6 +7,7 @@ import { assertHouseholdSharedAccess, getHouseholdEntitlement, FamilySubscriptio
 
 type OwnerType = 'USER' | 'HOUSEHOLD';
 type ShoppingListStatus = 'ACTIVE' | 'COMPLETED' | 'ARCHIVED';
+type ShoppingDestination = { ownerType: OwnerType; householdId?: string; listId?: string };
 
 type ShoppingIngredientInput = {
   ingredientName?: string;
@@ -20,6 +21,11 @@ const MAX_FOOD_NAME_LENGTH = 80;
 const MAX_UNIT_LENGTH = 20;
 const MAX_QUANTITY = 100000;
 const UNIT_PATTERN = /^[\p{L}\d\s./-]+$/u;
+const ITEM_REASONS = ['MISSING_INGREDIENT', 'USER_ADDED', 'LOW_STOCK', 'VIDEO_RECIPE'];
+
+export class ShoppingListValidationError extends Error {
+  readonly statusCode = 400;
+}
 
 export class ShoppingListConflictError extends Error {
   readonly statusCode = 409;
@@ -59,54 +65,98 @@ function normalizeName(value: string) {
 
 function validateFoodName(foodName: string) {
   if (!foodName) {
-    throw new Error('foodName is required');
+    throw new ShoppingListValidationError('foodName is required');
   }
   if (foodName.length > MAX_FOOD_NAME_LENGTH) {
-    throw new Error(`foodName must not exceed ${MAX_FOOD_NAME_LENGTH} characters`);
+    throw new ShoppingListValidationError(`foodName must not exceed ${MAX_FOOD_NAME_LENGTH} characters`);
   }
 }
 
 function validateQuantity(quantity: number) {
   if (!Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error('quantity is required and must be greater than 0');
+    throw new ShoppingListValidationError('quantity is required and must be greater than 0');
   }
   if (quantity > MAX_QUANTITY) {
-    throw new Error(`quantity must not exceed ${MAX_QUANTITY}`);
+    throw new ShoppingListValidationError(`quantity must not exceed ${MAX_QUANTITY}`);
   }
-  const decimalPart = String(quantity).split('.')[1];
-  if (decimalPart && decimalPart.length > 3) {
-    throw new Error('quantity must not have more than 3 decimal places');
+  const [coefficient, exponent = '0'] = String(quantity).toLowerCase().split('e');
+  if ((coefficient.split('.')[1]?.length ?? 0) - Number(exponent) > 3) {
+    throw new ShoppingListValidationError('quantity must not have more than 3 decimal places');
   }
 }
 
 function validateUnit(unit: string) {
   if (!unit) {
-    throw new Error('unit is required');
+    throw new ShoppingListValidationError('unit is required');
   }
   if (unit.length > MAX_UNIT_LENGTH) {
-    throw new Error(`unit must not exceed ${MAX_UNIT_LENGTH} characters`);
+    throw new ShoppingListValidationError(`unit must not exceed ${MAX_UNIT_LENGTH} characters`);
   }
   if (!UNIT_PATTERN.test(unit)) {
-    throw new Error('unit contains invalid characters');
+    throw new ShoppingListValidationError('unit contains invalid characters');
   }
+}
+
+function trimmedText(value: unknown, field: string) {
+  if (typeof value !== 'string') throw new ShoppingListValidationError(`${field} must be a string`);
+  return value.trim();
+}
+
+function itemQuantity(value: unknown) {
+  if (typeof value !== 'number' && typeof value !== 'string') throw new ShoppingListValidationError('quantity is invalid');
+  const quantity = Number(value); validateQuantity(quantity); return quantity;
+}
+
+function purchasedStatus(value: unknown) {
+  if (typeof value !== 'boolean') throw new ShoppingListValidationError('isPurchased must be a boolean');
+  return value;
+}
+
+function itemReason(value: unknown) {
+  if (typeof value !== 'string' || !ITEM_REASONS.includes(value)) throw new ShoppingListValidationError('reason is invalid');
+  return value;
+}
+
+function normalizedItem(data: any, userId: string) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new ShoppingListValidationError('item is invalid');
+  const foodName = trimmedText(data.foodName, 'foodName'), unit = trimmedText(data.unit, 'unit');
+  validateFoodName(foodName); validateUnit(unit);
+  const quantity = itemQuantity(data.quantity);
+  const isPurchased = data.isPurchased === undefined ? false : purchasedStatus(data.isPurchased);
+  const categoryId = data.categoryId?._id ?? data.categoryId;
+  if (categoryId != null) assertValidObjectId(String(categoryId), 'categoryId');
+  if (data.itemId != null) assertValidObjectId(String(data.itemId), 'itemId');
+  return { itemId: data.itemId, foodName, categoryId, quantity, unit,
+    reason: itemReason(data.reason === undefined ? 'USER_ADDED' : data.reason), isPurchased,
+    addedBy: userId, purchasedAt: isPurchased ? new Date() : undefined, purchasedBy: isPurchased ? userId : undefined };
 }
 
 function getActiveHouseholdMember(householdId: string, userId: string) {
   return HouseholdMember.findOne({ householdId, userId, status: 'ACTIVE' });
 }
 
+function canAccessHouseholdList(member: any, ownerId: unknown, userId: string, mode: 'VIEW' | 'EDIT') {
+  if (!member || !ownerId) return false;
+  const isOwner = String(ownerId) === userId;
+  if (member.role === 'OWNER') return isOwner;
+  return member.role === 'MEMBER' && !isOwner && member.permission?.canViewShoppingList === true
+    && (mode === 'VIEW' || member.permission?.canEditShoppingList === true);
+}
+
 async function getViewableHouseholdIds(userId: string) {
   const memberships = await HouseholdMember.find({
     userId,
     status: 'ACTIVE',
-    'permission.canViewShoppingList': true
-  }).select('householdId');
+    $or: [{ role: 'OWNER' }, { 'permission.canViewShoppingList': true }]
+  }).select('householdId role permission');
 
   const visible = [];
   for (const membership of memberships) {
     try {
       const entitlement = await getHouseholdEntitlement(String(membership.householdId));
-      if (entitlement.canReadSharedData) visible.push(membership.householdId);
+      if (entitlement.canReadSharedData && canAccessHouseholdList(membership, entitlement.ownerId, userId, 'VIEW')) {
+        visible.push(membership.householdId);
+      }
     } catch (error) { if (!(error instanceof FamilySubscriptionError)) throw error; }
   }
   return visible;
@@ -115,9 +165,7 @@ async function getViewableHouseholdIds(userId: string) {
 async function ensureCanViewList(list: any, userId: string) {
   if (list.ownerType === 'USER') {
     const isOwner = list.userId?.toString() === userId;
-    const isShared = list.sharedWith?.some((share: any) => share.userId?.toString() === userId);
-
-    if (!isOwner && !isShared) {
+    if (!isOwner) {
       throw new Error('You do not have permission to view this shopping list');
     }
 
@@ -125,7 +173,8 @@ async function ensureCanViewList(list: any, userId: string) {
   }
 
   const member = await getActiveHouseholdMember(list.householdId?.toString(), userId);
-  if (!member || !member.permission?.canViewShoppingList) {
+  const household = await Household.findOne({ _id: list.householdId, status: 'ACTIVE' });
+  if (!household || !canAccessHouseholdList(member, household.ownerId, userId, 'VIEW')) {
     throw new Error('You do not have permission to view this shopping list');
   }
   await assertHouseholdSharedAccess(String(list.householdId), 'VIEW');
@@ -134,9 +183,7 @@ async function ensureCanViewList(list: any, userId: string) {
 async function ensureCanEditList(list: any, userId: string) {
   if (list.ownerType === 'USER') {
     const isOwner = list.userId?.toString() === userId;
-    const sharedAccess = list.sharedWith?.find((share: any) => share.userId?.toString() === userId);
-
-    if (!isOwner && sharedAccess?.permission !== 'EDIT') {
+    if (!isOwner) {
       throw new Error('You do not have permission to edit this shopping list');
     }
 
@@ -145,10 +192,7 @@ async function ensureCanEditList(list: any, userId: string) {
 
   const member = await getActiveHouseholdMember(list.householdId?.toString(), userId);
   const household = await Household.findOne({ _id: list.householdId, status: 'ACTIVE' });
-  const owner = member?.role === 'OWNER' && String(household?.ownerId) === userId;
-  const canEdit = household && (owner || (member?.role === 'MEMBER' && member.permission?.canEditShoppingList));
-
-  if (!canEdit) {
+  if (!household || !canAccessHouseholdList(member, household.ownerId, userId, 'EDIT')) {
     throw new Error('You do not have permission to edit this shopping list');
   }
   await assertHouseholdSharedAccess(String(list.householdId), 'EDIT');
@@ -171,17 +215,28 @@ async function findAccessibleList(listId: string, userId: string, mode: 'VIEW' |
   return list;
 }
 
-export async function getShoppingLists(userId: string, status?: ShoppingListStatus | 'ALL') {
-  const householdIds = await getViewableHouseholdIds(userId);
+export async function getShoppingLists(userId: string, status?: ShoppingListStatus | 'ALL', context?: { ownerType: OwnerType; householdId?: string }) {
   const statusFilter = status && status !== 'ALL' ? { status } : { status: { $ne: 'ARCHIVED' } };
+  let ownership: any;
+  if (context !== undefined) {
+    if (!context || !['USER', 'HOUSEHOLD'].includes(context.ownerType)) throw new ShoppingListValidationError('ownerType is invalid');
+    if (context.ownerType === 'USER') {
+      if (context.householdId !== undefined) throw new ShoppingListValidationError('Personal householdId is invalid');
+      ownership = { ownerType: 'USER', userId };
+    } else {
+      if (!context.householdId) throw new ShoppingListValidationError('householdId is required');
+      assertValidObjectId(context.householdId, 'householdId');
+      await ensureCanViewList({ ownerType: 'HOUSEHOLD', householdId: context.householdId }, userId);
+      ownership = { ownerType: 'HOUSEHOLD', householdId: context.householdId };
+    }
+  } else {
+    const householdIds = await getViewableHouseholdIds(userId);
+    ownership = { $or: [{ ownerType: 'USER', userId }, { ownerType: 'HOUSEHOLD', householdId: { $in: householdIds } }] };
+  }
 
   return ShoppingList.find({
     ...statusFilter,
-    $or: [
-      { ownerType: 'USER', userId },
-      { ownerType: 'USER', 'sharedWith.userId': userId },
-      { ownerType: 'HOUSEHOLD', householdId: { $in: householdIds } }
-    ]
+    ...ownership,
   })
     .populate('householdId', 'householdName planType status')
     .populate('items.categoryId', 'categoryName')
@@ -193,8 +248,9 @@ export async function getActiveShoppingLists(userId: string) {
 }
 
 export async function createShoppingList(userId: string, data: any) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new ShoppingListValidationError('list payload is invalid');
   const ownerType = (data.ownerType ?? 'USER') as OwnerType;
-  const listName = data.listName?.trim();
+  const listName = typeof data.listName === 'string' ? data.listName.trim() : '';
 
   if (!['USER', 'HOUSEHOLD'].includes(ownerType)) {
     throw new Error('ownerType must be USER or HOUSEHOLD');
@@ -203,6 +259,8 @@ export async function createShoppingList(userId: string, data: any) {
   if (!listName) {
     throw new Error('listName is required');
   }
+  if (data.items !== undefined && !Array.isArray(data.items)) throw new ShoppingListValidationError('items must be an array');
+  const items = (data.items ?? []).map((item: any) => normalizedItem(item, userId));
 
   if (ownerType === 'HOUSEHOLD') {
     const householdId = data.householdId;
@@ -219,7 +277,7 @@ export async function createShoppingList(userId: string, data: any) {
       listName,
       visibility: 'SHARED',
       status: 'ACTIVE',
-      items: data.items ?? [],
+      items,
       createdFrom: data.createdFrom ?? { type: 'MANUAL' }
     });
   }
@@ -228,11 +286,13 @@ export async function createShoppingList(userId: string, data: any) {
     ownerType,
     userId,
     listName,
-    visibility: data.visibility ?? 'PERSONAL',
+    // Personal ownership comes only from the authenticated user. Ignore
+    // sharing input; historical sharing fields are retained on existing rows.
+    visibility: 'PERSONAL',
     status: 'ACTIVE',
-    items: data.items ?? [],
+    items,
     createdFrom: data.createdFrom ?? { type: 'MANUAL' },
-    sharedWith: data.sharedWith ?? []
+    sharedWith: []
   });
 }
 
@@ -246,26 +306,7 @@ export async function getShoppingListById(listId: string, userId: string) {
 
 export async function addShoppingListItem(listId: string, userId: string, data: any) {
   const list = await findAccessibleList(listId, userId, 'EDIT');
-  const foodName = data.foodName?.trim();
-  const quantity = Number(data.quantity);
-  const unit = data.unit?.trim();
-
-  validateFoodName(foodName);
-  validateQuantity(quantity);
-  validateUnit(unit);
-
-  list.items.push({
-    itemId: data.itemId,
-    foodName,
-    categoryId: data.categoryId,
-    quantity,
-    unit,
-    reason: data.reason ?? 'USER_ADDED',
-    isPurchased: data.isPurchased ?? false,
-    purchasedAt: data.isPurchased ? new Date() : undefined,
-    addedBy: userId,
-    purchasedBy: data.isPurchased ? userId : undefined
-  });
+  list.items.push(normalizedItem(data, userId));
 
   const saved = await saveShoppingList(list);
   return saved.items[saved.items.length - 1];
@@ -278,35 +319,36 @@ export async function updateShoppingListItem(
   data: any
 ) {
   const list = await findAccessibleList(listId, userId, 'EDIT');
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new ShoppingListValidationError('item payload is invalid');
   const item = list.items.id(itemId);
 
   if (!item) {
     throw new Error('Shopping list item not found');
   }
 
+  const changes: Record<string, any> = {};
   if (data.foodName !== undefined) {
-    const foodName = data.foodName.trim();
+    const foodName = trimmedText(data.foodName, 'foodName');
     validateFoodName(foodName);
-    item.foodName = foodName;
+    changes.foodName = foodName;
   }
-  if (data.categoryId !== undefined) item.categoryId = data.categoryId;
+  if (data.categoryId !== undefined) changes.categoryId = data.categoryId;
   if (data.quantity !== undefined) {
-    const quantity = Number(data.quantity);
-    validateQuantity(quantity);
-    item.quantity = quantity;
+    changes.quantity = itemQuantity(data.quantity);
   }
   if (data.unit !== undefined) {
-    const unit = data.unit.trim();
+    const unit = trimmedText(data.unit, 'unit');
     validateUnit(unit);
-    item.unit = unit;
+    changes.unit = unit;
   }
-  if (data.reason !== undefined) item.reason = data.reason;
+  if (data.reason !== undefined) changes.reason = itemReason(data.reason);
 
   if (data.isPurchased !== undefined) {
-    item.isPurchased = Boolean(data.isPurchased);
-    item.purchasedAt = item.isPurchased ? new Date() : undefined;
-    item.purchasedBy = item.isPurchased ? userId : undefined;
+    changes.isPurchased = purchasedStatus(data.isPurchased);
+    changes.purchasedAt = changes.isPurchased ? new Date() : undefined;
+    changes.purchasedBy = changes.isPurchased ? userId : undefined;
   }
+  Object.assign(item, changes);
 
   const saved = await saveShoppingList(list);
   return saved.items.id(itemId);
@@ -336,48 +378,39 @@ export async function completeShoppingList(listId: string, userId: string) {
 
 export async function addMissingIngredientsToShoppingList(
   userId: string,
-  items: ShoppingIngredientInput[] = []
+  items: ShoppingIngredientInput[] = [],
+  destination?: ShoppingDestination,
 ) {
-  const cleanItems = items
-    .map((item) => {
-      const foodName = String(item.foodName || item.ingredientName || '').trim();
-      const categoryId = item.categoryId?._id || item.categoryId;
-      const quantity = Number(item.quantity) > 0 ? Number(item.quantity) : 1;
-      const unit = String(item.unit || 'g').trim() || 'g';
+  if (!Array.isArray(items) || !items.length) throw new ShoppingListValidationError('items are required');
+  const cleanItems = items.map((item: any) => normalizedItem({ ...item, foodName: item?.foodName ?? item?.ingredientName,
+    quantity: item?.quantity === undefined ? 1 : item.quantity, unit: item?.unit === undefined ? 'g' : item.unit }, userId));
 
-      if (foodName) {
-        validateFoodName(foodName);
-        validateQuantity(quantity);
-        validateUnit(unit);
-      }
-
-      return { foodName, categoryId, quantity, unit };
-    })
-    .filter((item) => item.foodName);
-
-  if (!cleanItems.length) throw new Error('items are required');
-
-  let list = await ShoppingList.findOne({
-    ownerType: 'USER',
-    userId,
-    status: 'ACTIVE',
-    'createdFrom.type': 'MEAL_PLAN'
-  });
-
-  if (!list) {
-    list = await ShoppingList.create({
-      ownerType: 'USER',
-      userId,
-      listName: 'Meal Plan Shopping List',
-      visibility: 'PERSONAL',
-      status: 'ACTIVE',
-      createdFrom: { type: 'MEAL_PLAN' },
-      items: []
-    });
+  const ownerType = destination === undefined ? 'USER' : destination?.ownerType;
+  if (!['USER', 'HOUSEHOLD'].includes(ownerType)) throw new Error('Shopping destination ownerType is invalid');
+  if (ownerType === 'USER' && destination?.householdId !== undefined) throw new Error('Personal destination householdId is invalid');
+  const householdId = destination?.householdId;
+  if (ownerType === 'HOUSEHOLD') {
+    if (!householdId) throw new Error('householdId is required');
+    assertValidObjectId(householdId, 'householdId');
+    await ensureCanEditList({ ownerType, householdId }, userId);
+  }
+  let list: any;
+  if (destination?.listId !== undefined) {
+    list = await findAccessibleList(destination.listId, userId, 'EDIT');
+    if (list.ownerType !== ownerType || (ownerType === 'HOUSEHOLD' && String(list.householdId) !== householdId)) {
+      throw new Error('Shopping destination context is invalid');
+    }
+    if (list.status !== 'ACTIVE') throw new Error('Shopping destination list must be ACTIVE');
+  } else {
+    list = await ShoppingList.findOne({ ownerType, ...(ownerType === 'USER' ? { userId } : { householdId }),
+      status: 'ACTIVE', 'createdFrom.type': 'MEAL_PLAN' });
+    if (list) await ensureCanEditList(list, userId);
   }
 
+  // Validate the entire merge before creating or changing a stored list.
+  const merged: any[] = (list?.items ?? []).map((item: any) => item.toObject?.() ?? { ...item });
   cleanItems.forEach((item) => {
-    const existing = list!.items.find(
+    const existing = merged.find(
       (entry: any) =>
         !entry.isPurchased &&
         normalizeName(entry.foodName) === normalizeName(item.foodName) &&
@@ -385,10 +418,12 @@ export async function addMissingIngredientsToShoppingList(
     ) as any;
 
     if (existing) {
-      existing.quantity = Number(existing.quantity || 0) + item.quantity;
+      const previous = itemQuantity(existing.quantity);
+      const total = (Math.round(previous * 1000) + Math.round(item.quantity * 1000)) / 1000;
+      validateQuantity(total); existing.quantity = total;
       existing.reason = 'MISSING_INGREDIENT';
     } else {
-      list!.items.push({
+      merged.push({
         foodName: item.foodName,
         categoryId: item.categoryId,
         quantity: item.quantity,
@@ -399,6 +434,11 @@ export async function addMissingIngredientsToShoppingList(
     }
   });
 
+  if (!list) list = await createShoppingList(userId, {
+    ownerType, ...(ownerType === 'HOUSEHOLD' ? { householdId } : {}), listName: 'Meal Plan Shopping List',
+    createdFrom: { type: 'MEAL_PLAN' }, items: [],
+  });
+  list.items = merged;
   const saved = await saveShoppingList(list);
   return saved.populate('items.categoryId', 'categoryName');
 }

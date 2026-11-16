@@ -186,18 +186,24 @@ test('previous paid Family grants disqualify an owner, including legacy, expired
   }
 });
 
-test('active paid Family and active legacy Premium access are preserved without migration', async () => {
-  for (const legacy of [false, true]) {
-    const h = harness();
-    if (legacy) {
-      h.state().plans.push({ _id: id(22), planCode: 'PREMIUM_MONTHLY', scope: 'USER', limits, isActive: true });
-      h.state().subscriptions.push({ _id: id(101), userId: OWNER, planId: id(22), planCode: 'PREMIUM_MONTHLY',
-        status: 'ACTIVE', startDate: new Date(h.time() - DAY), endDate: new Date(h.time() + 60 * DAY) });
-    } else h.paid();
-    const before = structuredClone(h.state().subscriptions);
-    await assert.rejects(h.service.startHouseholdTrial(OWNER, HOUSE), status(409));
-    assert.deepEqual(h.state().subscriptions, before); assert.equal(h.state().households[0].membershipRevision, 0);
-  }
+test('active paid Family cannot be replaced by a trial', async () => {
+  const h = harness(); h.paid(); const before = structuredClone(h.state().subscriptions);
+  await assert.rejects(h.service.startHouseholdTrial(OWNER, HOUSE), status(409));
+  assert.deepEqual(h.state().subscriptions, before); assert.equal(h.state().households[0].membershipRevision, 0);
+});
+
+test('personal Premium does not consume Family trial eligibility and remains unchanged after explicit trial activation', async () => {
+  const h = harness();
+  h.state().plans.push({ _id: id(22), planCode: 'PREMIUM_MONTHLY', scope: 'USER', limits, isActive: true });
+  const premium = { _id: id(101), userId: OWNER, planId: id(22), planCode: 'PREMIUM_MONTHLY',
+    status: 'ACTIVE', startDate: new Date(h.time() - DAY), endDate: new Date(h.time() + 60 * DAY) };
+  h.state().subscriptions.push(structuredClone(premium));
+  const metadata = await h.service.getHouseholdSubscription(OWNER, HOUSE);
+  assert.equal(metadata.hasFamilyAccess, false); assert.equal(metadata.trialEligibility.eligible, true);
+  assert.equal(h.writes.length, 0);
+  await h.service.startHouseholdTrial(OWNER, HOUSE);
+  assert.equal((await h.service.getHouseholdSubscription(OWNER, HOUSE)).isTrial, true);
+  assert.deepEqual(h.state().subscriptions[0], premium); assert.equal(h.state().subscriptions.length, 2);
 });
 
 test('an unverified pending payment grant cannot disqualify or activate a household', async () => {

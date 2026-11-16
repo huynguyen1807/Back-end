@@ -249,8 +249,8 @@ function configuredLimits(plan: any, legacy: boolean) {
 }
 
 // This resolver is read-only and can participate in a caller's transaction.
-// A verified household activation permanently takes precedence over legacy
-// owner Premium, including after that household subscription expires.
+// Only a verified household trial/paid grant unlocks shared capabilities.
+// Legacy owner Premium is retained solely to preserve existing data reads.
 export async function getHouseholdEntitlement(householdId: string, session?: mongoose.ClientSession) {
   const now = new Date();
   const household = await Household.findOne({ _id: householdId, status: 'ACTIVE' }, null, { session });
@@ -290,7 +290,7 @@ export async function getHouseholdEntitlement(householdId: string, session?: mon
     : ['FAMILY_MONTHLY', 'FAMILY_YEARLY'].includes(subscription?.planCode);
   const planMatches = plan && plan.planCode === subscription?.planCode
     && (legacy ? (!plan.scope || plan.scope === 'USER') : plan.scope === 'HOUSEHOLD');
-  const hasPaidAccess = Boolean(subscription && codeMatches && planMatches && limits
+  const hasPaidAccess = Boolean(!legacy && subscription && codeMatches && planMatches && limits
     && String(subscription.userId) === String(household.ownerId)
     && subscription.status === 'ACTIVE' && new Date(subscription.startDate) <= now
     && new Date(subscription.endDate) > now && plan.limits.familyCloudEnabled === true);

@@ -11,6 +11,7 @@ import {
   getShoppingLists,
   removeShoppingListItem,
   ShoppingListConflictError,
+  ShoppingListValidationError,
   updateShoppingListItem
 } from '../services/shoppingListService';
 
@@ -37,12 +38,15 @@ function getStatusCode(message: string) {
 
 function handleShoppingListError(res: Response, error: any) {
   const message = error.message ?? 'Server error';
-  res.status(error instanceof ShoppingListConflictError ? 409 : error instanceof FamilySubscriptionError ? 403 : getStatusCode(message)).json({ success: false, message });
+  res.status(error instanceof ShoppingListConflictError ? 409 : error instanceof FamilySubscriptionError ? 403
+    : error instanceof ShoppingListValidationError || ['ValidationError', 'CastError'].includes(error.name) ? 400 : getStatusCode(message)).json({ success: false, message });
 }
 
 export const listShoppingListsHandler = async (req: AuthRequest, res: Response) => {
   try {
-    const lists = await getShoppingLists(req.user!.userId, req.query.status as any);
+    const context = req.query.ownerType !== undefined || req.query.householdId !== undefined
+      ? { ownerType: req.query.ownerType as any, householdId: req.query.householdId as string | undefined } : undefined;
+    const lists = await getShoppingLists(req.user!.userId, req.query.status as any, context);
     res.json({ success: true, data: lists });
   } catch (error: any) {
     handleShoppingListError(res, error);
@@ -116,7 +120,7 @@ export const completeShoppingListHandler = async (req: AuthRequest, res: Respons
 
 export const addMissingIngredientsHandler = async (req: AuthRequest, res: Response) => {
   try {
-    const list = await addMissingIngredientsToShoppingList(req.user!.userId, req.body.items);
+    const list = await addMissingIngredientsToShoppingList(req.user!.userId, req.body.items, req.body.destination);
     res.status(201).json({ success: true, data: list });
   } catch (error: any) {
     handleShoppingListError(res, error);
