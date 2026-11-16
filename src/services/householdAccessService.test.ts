@@ -11,11 +11,11 @@ beforeEach((t) => {
   (t as TestContext).mock.method(Subscription, 'findOne', (query: any) => ({
     populate() { return this; },
     async sort() {
-      if (query.scope === 'HOUSEHOLD') return null;
+      if (query.scope !== 'HOUSEHOLD' || query.startDate?.$gt) return null;
       return {
-        _id: 'legacy-sub', userId: 'owner', planCode: 'PREMIUM_MONTHLY', status: 'ACTIVE',
+        _id: 'family-sub', userId: 'owner', scope: 'HOUSEHOLD', planCode: 'FAMILY_MONTHLY', status: 'ACTIVE',
         startDate: new Date('2000-01-01'), endDate: new Date('2999-01-01'),
-        planId: { planCode: 'PREMIUM_MONTHLY', scope: 'USER', limits: { maxMembers: 6, maxFoodItems: 1000, maxStorageLocations: 10, familyCloudEnabled: true } },
+        planId: { planCode: 'FAMILY_MONTHLY', scope: 'HOUSEHOLD', limits: { maxMembers: 6, maxFoodItems: 1000, maxStorageLocations: 10, familyCloudEnabled: true } },
       };
     },
   }));

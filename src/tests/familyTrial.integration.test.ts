@@ -218,8 +218,8 @@ test('scheduled verified paid records do not override the current trial before t
   assert.equal(await Subscription.countDocuments({ householdId: f.householdId }), 2);
 });
 
-test('existing invitation HTTP route distinguishes missing recipient from missing endpoint and accepts a registered account', async () => {
-  const f = await fixture(); await startHouseholdTrial(f.owner, f.householdId);
+test('UC-26 Invite Family Member requires Family trial/paid access even when owner has personal Premium', async () => {
+  const f = await fixture();
   const candidate = await User.create({ fullName: 'Synthetic invitation recipient', email: `${objectId()}@task04.invalid`, passwordHash: 'synthetic' });
   const { signToken } = await import('../utils/jwt');
   const router = (await import('../routes/householdRoutes')).default;
@@ -230,6 +230,17 @@ test('existing invitation HTTP route distinguishes missing recipient from missin
     const url = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}/api/households/${f.householdId}/members`;
     const send = (email: string, userId = f.owner) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
       Authorization: `Bearer ${signToken({ userId, role: 'USER' })}` }, body: JSON.stringify({ email }) });
+    assert.equal((await getHouseholdSubscription(f.owner, f.householdId)).hasFamilyAccess, false);
+    assert.equal(await Subscription.countDocuments({ householdId: f.householdId }), 0);
+    assert.equal((await send(candidate.email)).status, 403, 'Free owner may create household but cannot invite yet');
+    const premiumPlan = await SubscriptionPlan.create({ scope: 'USER', planCode: 'PREMIUM_MONTHLY', planName: 'Premium Monthly',
+      price: 123, currency: 'VND', durationDays: 30, limits: monthly.limits });
+    const premium = await Subscription.create({ userId: f.owner, scope: 'USER', provider: 'REVENUECAT', planId: premiumPlan._id,
+      planCode: 'PREMIUM_MONTHLY', status: 'ACTIVE', startDate: new Date(Date.now() - DAY), endDate: new Date(Date.now() + DAY) });
+    assert.equal((await send(candidate.email)).status, 403, 'Personal Premium does not unlock invitations');
+    assert.equal(await HouseholdInvitation.countDocuments({ householdId: f.householdId }), 0);
+    await startHouseholdTrial(f.owner, f.householdId);
+    assert.equal((await Subscription.findById(premium._id))!.status, 'ACTIVE');
     const missing = await send(`${objectId()}@task04.invalid`);
     assert.equal(missing.status, 404); const missingBody = await missing.json() as any;
     assert.equal(missingBody.success, false); assert.match(missingBody.message, /FreshFriends/);
@@ -238,6 +249,10 @@ test('existing invitation HTTP route distinguishes missing recipient from missin
     assert.equal((await send(`  ${candidate.email.toUpperCase()}  `)).status, 201);
     assert.equal((await send(candidate.email)).status, 409);
     assert.equal(await HouseholdInvitation.countDocuments({ householdId: f.householdId, inviteEmail: candidate.email, status: 'PENDING' }), 1);
-    console.log('Invitation HTTP statuses verified: missing=404, invalid=400, member=403, registered=201, duplicate=409');
+    const end = new Date(Date.now() - 1000), start = new Date(end.getTime() - 30 * DAY);
+    await Subscription.updateOne({ householdId: f.householdId, grantType: 'TRIAL' }, { startDate: start, activatedAt: start, endDate: end });
+    assert.equal((await send(candidate.email)).status, 403, 'Expired Family cannot invite through personal Premium fallback');
+    assert.equal(await HouseholdInvitation.countDocuments({ householdId: f.householdId }), 1);
+    console.log('UC-26: Free=403, personal Premium=403, trial owner=201, member=403, duplicate=409, expired=403');
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });

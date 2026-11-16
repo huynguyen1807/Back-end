@@ -195,11 +195,18 @@ test('owner and member obtain the same backend entitlement while only owner can 
   assert.equal(owner.canManageSubscription, true); assert.equal(member.canManageSubscription, false);
 });
 
-test('legacy owner Premium remains available without migrating subscription data', async () => {
+test('owner Premium preserves personal benefits and old reads but never unlocks Family mutations', async () => {
   const h = harness(); const legacy = h.legacy(); delete h.plans[1].limits.maxMembers;
   const before = JSON.stringify(legacy);
   const result = await h.service.getHouseholdEntitlement(HOUSE);
-  assert.equal(result.hasPaidAccess, true); assert.equal(result.source, 'LEGACY_OWNER'); assert.equal(result.limits.maxMembers, 6);
+  assert.equal(result.hasPaidAccess, false); assert.equal(result.hasFamilyAccess, false);
+  assert.equal(result.readOnly, true); assert.equal(result.canReadSharedData, true);
+  assert.equal(result.source, 'LEGACY_OWNER'); assert.equal(result.limits.maxMembers, 6);
+  assert.equal((await h.service.getUserCurrentSubscription(OWNER)).isPremium, true);
+  await h.access.assertHouseholdInventoryAccess({ ownerType: 'HOUSEHOLD', householdId: HOUSE }, OWNER, 'VIEW');
+  await assert.rejects(h.access.assertHouseholdInventoryAccess({ ownerType: 'HOUSEHOLD', householdId: HOUSE }, OWNER, 'EDIT'), (error: any) => error.statusCode === 403);
+  await assert.rejects(h.shopping.createShoppingList(OWNER, { ownerType: 'HOUSEHOLD', householdId: HOUSE, listName: 'Shared' }), (error: any) => error.statusCode === 403);
+  assert.equal(h.mutations.length, 0);
   assert.equal(JSON.stringify(legacy), before);
 });
 
@@ -213,9 +220,10 @@ for (const fields of [{ status: 'EXPIRED', endDate: past() }, { status: 'CANCELL
   });
 }
 
-test('pending unverified Family does not revoke an existing legacy entitlement or grant access itself', async () => {
+test('pending unverified Family and owner Premium cannot unlock household capabilities', async () => {
   const h = harness(); const pending = h.family({ status: 'PENDING', activatedAt: undefined }); h.legacy();
   assert.equal((await h.service.getHouseholdEntitlement(HOUSE)).source, 'LEGACY_OWNER');
+  assert.equal((await h.service.getHouseholdEntitlement(HOUSE)).hasFamilyAccess, false);
   h.subscriptions.splice(h.subscriptions.indexOf(pending) + 1);
   assert.equal((await h.service.getHouseholdEntitlement(HOUSE)).hasPaidAccess, false);
 });
